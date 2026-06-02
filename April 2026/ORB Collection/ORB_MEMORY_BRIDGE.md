@@ -53,7 +53,7 @@
 
 ### Confirmed reference names in prompt
 - Arthur Merrill
-- Toby Crabel (prompt text also includes `#TobyRabel` tag; likely typo retained from source)
+- Toby Crabel (source text also includes `#TobyRabel`; likely intended as `#TobyCrabel`)
 - Larry Williams
 - Sheldon Knight
 - ChartsWatcher
