@@ -1,33 +1,9 @@
-# Conversation Archive — ORB / ORBZ Context
+# April 2026 — ORB/ORBZ Conversation Archive Index
 
-## Source context captured from this chat
+This file intentionally acts as the **April 2026 category** for multi-agent work.
 
-### Repository context
-- Repository mentioned: `TuskenDayTrader/ORBZ`
-- Repository ID: `1240778916`
-- Permission granted to organize ORB-related content and data into its own collection in that repository.
+## ORB / ORBZ
+- `April 2026/ORBZ_Conversation_Archive_2026-06-02.md` — archive of the 2026-06-02 chat thread about ORB prompt mining + repo placement.
 
-### ORB mining prompt context
-The conversation included a detailed ORB metadata mining prompt covering:
-- Files and documents created
-- ORB strategy content and rules
-- Educational framework and accessibility design
-- Source materials and references
-- Iteration history and decisions
-- Gaps, weaknesses, and open items
-- User context and preferences
-- A structural map of output
-- Recommended next iterations
-- Quality and consistency audit
-
-### Repository placement request
-The user then requested:
-- "put all this conversation in this repository"
-- Target location referenced: `https://github.com/TuskenDayTrader/TheENGINE/blob/main/April%202026`
-
-## Category isolation for multi-agent use
-This file is being used as a dedicated archive category so the conversation can be stored separately and reduce conflict with other agents writing to the same repository.
-
-## Cost note
-I cannot determine an actual human monetary cost from the conversation alone.
-A real cost would require your labor rate or billing model plus the time spent authoring, reviewing, and maintaining this archive.
+### Notes
+- Keeping ORB/ORBZ material under its own subpath prevents conflicts with other agents writing unrelated material.
