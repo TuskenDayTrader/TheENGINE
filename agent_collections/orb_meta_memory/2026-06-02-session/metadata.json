@@ -1,0 +1,24 @@
+{
+  "collection": "orb_meta_memory",
+  "session_date": "2026-06-02",
+  "repository": "TuskenDayTrader/TheENGINE",
+  "namespace": "agent_collections/orb_meta_memory/2026-06-02-session/",
+  "purpose": "Isolated ORB conversation capture to prevent clashes with other agent outputs",
+  "status": "complete",
+  "tags": [
+    "ORB",
+    "OpeningRangeBreakout",
+    "DayTrading",
+    "MetaMemory",
+    "AccessibleTrading",
+    "TuskenDayTrader"
+  ],
+  "source": {
+    "type": "chat_session",
+    "date": "2026-06-02"
+  },
+  "notes": [
+    "User explicitly requested isolated home/location",
+    "Repo confirmed by user as TuskenDayTrader/TheENGINE"
+  ]
+}
