@@ -8,6 +8,7 @@ from enum import Enum
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from packages.core.image_extractor import ExtractionResult, extract_from_image
 from packages.core.models import AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
 from packages.core.output import build_poster
 from packages.core.scoring import score
@@ -94,6 +95,9 @@ class AnalyzeImageResponse(BaseModel):
     content_type: str
     size_bytes: int
     message: str
+    extraction_confidence: float | None = None
+    extraction_warning: str | None = None
+    analysis: AnalyzeResponse | None = None
 
 
 def _confidence_to_float(tag: ConvictionTag) -> float:
@@ -132,7 +136,7 @@ def _map_response(result: AnalysisResult, current_price: float, atr_14: float | 
     )
 
 
-@router.post("/analyze-image", response_model=AnalyzeImageResponse)
+@router.post("/analyze-image", response_model=AnalyzeImageResponse, response_model_exclude_none=True)
 async def analyze_image(
     file: UploadFile = File(...),
     ticker: str | None = Form(default=None),
@@ -140,8 +144,6 @@ async def analyze_image(
     lookback_days: int | None = Form(default=None),
     date_et: str | None = Form(default=None),
 ) -> AnalyzeImageResponse:
-    # Reserved for future OCR/context handling; accepted now as part of the upload contract.
-    _ = (ticker, timeframe, lookback_days, date_et)
     content_type = file.content_type or ""
     if content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
         raise HTTPException(
@@ -150,11 +152,69 @@ async def analyze_image(
         )
 
     contents = await file.read()
+
+    # Attempt extraction from image bytes
+    extraction: ExtractionResult = extract_from_image(
+        image_bytes=contents,
+        ticker=ticker or "UNKNOWN",
+        date_et=date_et,
+        timeframe=timeframe or "30m",
+        lookback_days=lookback_days or 5,
+    )
+
+    # When the image could not be decoded at all, return the minimal response
+    # so that existing callers that only care about upload acknowledgement
+    # continue to receive the same four-field payload.
+    if not extraction.image_decoded:
+        return AnalyzeImageResponse(
+            filename=file.filename or "",
+            content_type=content_type,
+            size_bytes=len(contents),
+            message="upload received",
+        )
+
+    # Run the scoring pipeline when extraction produced usable data
+    analysis: AnalyzeResponse | None = None
+    if extraction.levels_payload is not None and extraction.current_price is not None:
+        try:
+            _date_et = date_et or dt.date.today().isoformat()
+            try:
+                _timeframe_enum = Timeframe(timeframe or "30m")
+            except ValueError:
+                _timeframe_enum = Timeframe.M30
+
+            scored = score(
+                AnalysisPayload(
+                    date_et=_date_et,
+                    ticker=ticker or "UNKNOWN",
+                    timeframe=_timeframe_enum.value,
+                    lookback_days=lookback_days or 5,
+                    current_price=extraction.current_price,
+                    levels=extraction.levels_payload,
+                )
+            )
+            analysis = _map_response(
+                scored,
+                extraction.current_price,
+                extraction.levels_payload.atr14,
+            )
+        except Exception:
+            error_id = uuid.uuid4().hex[:8]
+            logger.exception(
+                "Scoring from image extraction failed for ticker=%s error_id=%s",
+                ticker,
+                error_id,
+            )
+            extraction.warning = f"Analysis failed (error {error_id})"
+
     return AnalyzeImageResponse(
         filename=file.filename or "",
         content_type=content_type,
         size_bytes=len(contents),
         message="upload received",
+        extraction_confidence=extraction.extraction_confidence,
+        extraction_warning=extraction.warning,
+        analysis=analysis,
     )
 
 
