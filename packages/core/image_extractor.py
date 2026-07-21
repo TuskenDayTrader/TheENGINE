@@ -248,7 +248,7 @@ def _parse_price_axis(img: "np.ndarray") -> List[Tuple[int, float]]:
             continue
         clean = raw.replace(",", "")
         # Require at least 2 digits to avoid stray characters
-        if not re.fullmatch(r"\d{2,}(\.\d*)?", clean):
+        if not re.fullmatch(r"\d{2,}(\.\d+)?", clean):
             continue
         try:
             price = float(clean)
