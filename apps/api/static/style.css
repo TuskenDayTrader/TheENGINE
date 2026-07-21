@@ -1,0 +1,160 @@
+/* TheENGINE UI — minimal light stylesheet */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #f5f6fa;
+    color: #1a1a2e;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem;
+}
+
+header {
+    width: 100%;
+    max-width: 640px;
+    margin-bottom: 2rem;
+    text-align: center;
+}
+
+header h1 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+}
+
+header p {
+    color: #555;
+    margin-top: 0.35rem;
+    font-size: 0.95rem;
+}
+
+.card {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    padding: 2rem;
+    width: 100%;
+    max-width: 640px;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 1.25rem;
+}
+
+.field label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+    color: #333;
+}
+
+.field input,
+.field select {
+    padding: 0.55rem 0.75rem;
+    border: 1px solid #d0d5dd;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.15s;
+    background: #fafafa;
+}
+
+.field input:focus,
+.field select:focus {
+    border-color: #4a90e2;
+    background: #fff;
+}
+
+.field .hint {
+    font-size: 0.78rem;
+    color: #888;
+    margin-top: 0.3rem;
+}
+
+button[type="submit"] {
+    width: 100%;
+    padding: 0.75rem;
+    background: #1a1a2e;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+    margin-top: 0.5rem;
+}
+
+button[type="submit"]:hover { background: #2e2e50; }
+button[type="submit"]:disabled { background: #aaa; cursor: not-allowed; }
+
+#status-banner {
+    margin-top: 1.25rem;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    display: none;
+}
+
+#status-banner.info  { background: #e8f4fd; color: #1a6399; border: 1px solid #b3d9f5; }
+#status-banner.ok    { background: #e6f9ed; color: #1a6641; border: 1px solid #a3dfba; }
+#status-banner.error { background: #fdecea; color: #99211a; border: 1px solid #f5b3b0; }
+
+.result-card {
+    margin-top: 1.5rem;
+    padding: 1.25rem 1.5rem;
+    background: #f0f4ff;
+    border-radius: 10px;
+    border: 1px solid #c5d3f5;
+    display: none;
+}
+
+.result-card h2 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 0.75rem;
+    color: #1a1a2e;
+}
+
+.result-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.88rem;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid #dde3f5;
+}
+
+.result-row:last-child { border-bottom: none; }
+
+.result-row .key   { color: #555; font-weight: 600; }
+.result-row .value { color: #1a1a2e; max-width: 60%; text-align: right; word-break: break-word; }
+
+.poster-text {
+    margin-top: 1rem;
+    background: #fff;
+    border-radius: 8px;
+    padding: 1rem;
+    font-size: 0.8rem;
+    font-family: monospace;
+    white-space: pre-wrap;
+    border: 1px solid #d0d5dd;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.fallback-msg {
+    margin-top: 1rem;
+    color: #555;
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+@media (max-width: 480px) {
+    .card { padding: 1.25rem; }
+    header h1 { font-size: 1.4rem; }
+}

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TheENGINE — Confluence Analyzer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>TheENGINE</h1>
+    <p>2+2+2+2 Confluence Scoring — Upload a chart screenshot to get started.</p>
+  </header>
+
+  <div class="card">
+    <form id="analyze-form" novalidate>
+
+      <div class="field">
+        <label for="file">Chart Screenshot <span style="color:#c00">*</span></label>
+        <input id="file" name="file" type="file" accept="image/png,image/jpeg,image/jpg,image/webp" required />
+        <span class="hint">PNG, JPG or WebP</span>
+      </div>
+
+      <div class="field">
+        <label for="ticker">Ticker <span style="color:#c00">*</span></label>
+        <input id="ticker" name="ticker" type="text" placeholder="e.g. NQ, ES" required />
+      </div>
+
+      <div class="field">
+        <label for="timeframe">Timeframe <span style="color:#c00">*</span></label>
+        <select id="timeframe" name="timeframe" required>
+          <option value="30m">30 minutes</option>
+          <option value="1h">1 hour</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="lookback_days">Lookback Days</label>
+        <input id="lookback_days" name="lookback_days" type="number" min="1" value="5" />
+        <span class="hint">Number of prior sessions to consider (default: 5)</span>
+      </div>
+
+      <div class="field">
+        <label for="date_et">Date (ET) — optional</label>
+        <input id="date_et" name="date_et" type="date" />
+        <span class="hint">Leave blank to use today's date</span>
+      </div>
+
+      <button type="submit" id="submit-btn">Analyze</button>
+    </form>
+
+    <div id="status-banner" role="status"></div>
+
+    <div class="result-card" id="result-card">
+      <h2>Analysis Result</h2>
+      <div id="result-rows"></div>
+      <pre class="poster-text" id="poster-text" style="display:none"></pre>
+      <p class="fallback-msg" id="fallback-msg" style="display:none"></p>
+    </div>
+  </div>
+
+  <script>
+    const form      = document.getElementById('analyze-form');
+    const submitBtn = document.getElementById('submit-btn');
+    const banner    = document.getElementById('status-banner');
+    const resultCard = document.getElementById('result-card');
+    const resultRows = document.getElementById('result-rows');
+    const posterEl  = document.getElementById('poster-text');
+    const fallbackEl = document.getElementById('fallback-msg');
+
+    function showBanner(msg, type) {
+      banner.textContent = msg;
+      banner.className = type;
+      banner.style.display = 'block';
+    }
+
+    function resetResult() {
+      resultCard.style.display = 'none';
+      resultRows.innerHTML = '';
+      posterEl.style.display = 'none';
+      posterEl.textContent = '';
+      fallbackEl.style.display = 'none';
+      fallbackEl.textContent = '';
+    }
+
+    function addRow(key, value) {
+      const div = document.createElement('div');
+      div.className = 'result-row';
+      div.innerHTML = `<span class="key">${key}</span><span class="value">${value}</span>`;
+      resultRows.appendChild(div);
+    }
+
+    function showResult(data) {
+      resultCard.style.display = 'block';
+      if (data.action_state) addRow('Action State', data.action_state);
+      if (data.confidence != null) addRow('Confidence', (data.confidence * 100).toFixed(0) + '%');
+      if (data.poster_text) {
+        posterEl.textContent = data.poster_text;
+        posterEl.style.display = 'block';
+      }
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      resetResult();
+
+      const fileInput = document.getElementById('file');
+      const ticker    = document.getElementById('ticker').value.trim();
+      const timeframe = document.getElementById('timeframe').value;
+      const lookback  = document.getElementById('lookback_days').value || '5';
+      const dateEt    = document.getElementById('date_et').value;
+
+      if (!fileInput.files.length) {
+        showBanner('Please select a chart screenshot.', 'error');
+        return;
+      }
+      if (!ticker) {
+        showBanner('Ticker is required.', 'error');
+        return;
+      }
+
+      submitBtn.disabled = true;
+      showBanner('Uploading screenshot…', 'info');
+
+      // Step 1: POST to /analyze-image
+      const fd = new FormData();
+      fd.append('file', fileInput.files[0]);
+      fd.append('ticker', ticker);
+      fd.append('timeframe', timeframe);
+      fd.append('lookback_days', lookback);
+      if (dateEt) fd.append('date_et', dateEt);
+
+      let uploadOk = false;
+      try {
+        const res = await fetch('/analyze-image', { method: 'POST', body: fd });
+        if (res.ok) {
+          uploadOk = true;
+          showBanner('Screenshot intake complete; level extraction not enabled yet.', 'ok');
+        } else {
+          const err = await res.json().catch(() => ({}));
+          showBanner('Upload failed: ' + (err.detail || res.statusText), 'error');
+        }
+      } catch (err) {
+        showBanner('Network error during upload: ' + err.message, 'error');
+      } finally {
+        submitBtn.disabled = false;
+      }
+
+      if (!uploadOk) return;
+
+      // Step 2: show fallback — full /analyze requires trading levels not available from image alone
+      resultCard.style.display = 'block';
+      fallbackEl.textContent =
+        'Screenshot intake complete; level extraction not enabled yet. ' +
+        'To run a full confluence analysis, supply trading levels via the /analyze API.';
+      fallbackEl.style.display = 'block';
+    });
+  </script>
+</body>
+</html>
