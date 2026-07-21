@@ -1,0 +1,28 @@
+{
+  "date_et": "2026-07-21",
+  "ticker": "ESU2026",
+  "timeframe": "30m",
+  "lookback_days": 14,
+  "current_price": 5540.0,
+  "levels": {
+    "pdh": 5580.0,
+    "pdl": 5490.0,
+    "prior_settle": 5510.0,
+    "rth_open": 5520.0,
+    "globex_high": 5565.0,
+    "globex_low": 5475.0,
+    "asia_high": 5558.0,
+    "asia_low": 5495.0,
+    "london_high": 5572.0,
+    "london_low": 5510.0,
+    "ny_high": 5548.0,
+    "ny_low": 5522.0,
+    "asia_ib_high": 5550.0,
+    "asia_ib_low": 5512.0,
+    "london_ib_high": 5560.0,
+    "london_ib_low": 5518.0,
+    "ny_ib_high": 5545.0,
+    "ny_ib_low": 5525.0,
+    "atr14": 45.0
+  }
+}
