@@ -205,6 +205,7 @@ async def analyze_image(
                 ticker,
                 error_id,
             )
+            extraction.warning = f"Analysis failed (error {error_id})"
 
     return AnalyzeImageResponse(
         filename=file.filename or "",

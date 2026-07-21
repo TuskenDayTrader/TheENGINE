@@ -79,6 +79,10 @@ _LINE_MIN_WIDTH_FRACTION: float = 0.10
 # Rightmost fraction of the image treated as the price axis
 _PRICE_AXIS_FRACTION: float = 0.15
 
+# Synthetic level offsets when no extracted levels exist on one side
+_SYNTHETIC_RESISTANCE_OFFSET: float = 1.001
+_SYNTHETIC_SUPPORT_OFFSET: float = 0.999
+
 # ---------------------------------------------------------------------------
 # Confidence weights (each component contributes equally)
 # ---------------------------------------------------------------------------
@@ -248,7 +252,7 @@ def _parse_price_axis(img: "np.ndarray") -> List[Tuple[int, float]]:
             continue
         clean = raw.replace(",", "")
         # Require at least 2 digits to avoid stray characters
-        if not re.fullmatch(r"\d{2,}(\.\d+)?", clean):
+        if not re.fullmatch(r"\d+(\.\d+)?", clean):
             continue
         try:
             price = float(clean)
@@ -344,8 +348,8 @@ def _build_levels_payload(
     kwargs: dict = {
         # Required fields; fall back to tiny synthetic offsets when no
         # extracted levels exist on that side
-        "pdh": resistance[0] if resistance else round(current_price * 1.001, 4),
-        "pdl": support[0] if support else round(current_price * 0.999, 4),
+        "pdh": resistance[0] if resistance else round(current_price * _SYNTHETIC_RESISTANCE_OFFSET, 4),
+        "pdl": support[0] if support else round(current_price * _SYNTHETIC_SUPPORT_OFFSET, 4),
         "prior_settle": current_price,
     }
 
