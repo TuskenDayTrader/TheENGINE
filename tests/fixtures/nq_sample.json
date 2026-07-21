@@ -1,0 +1,36 @@
+{
+  "_comment": "NQ July 21 2026 sample — moderate resistance overhead, strong support below. Expected: STAND_DOWN (mixed scores).",
+  "date_et": "2026-07-21",
+  "ticker": "NQU2026",
+  "timeframe": "30m",
+  "lookback_days": 14,
+  "current_price": 20240.00,
+  "levels": {
+    "pdh": 20320.00,
+    "pdl": 20102.00,
+    "prior_settle": 20210.00,
+    "rth_open": 20225.00,
+    "globex_high": 20315.00,
+    "globex_low": 20108.00,
+    "asia_high": 20260.00,
+    "asia_low": 20125.00,
+    "london_high": 20295.00,
+    "london_low": 20138.00,
+    "ny_high": 20318.00,
+    "ny_low": 20155.00,
+    "asia_ib_high": 20265.00,
+    "asia_ib_low": 20130.00,
+    "london_ib_high": 20280.00,
+    "london_ib_low": 20148.00,
+    "ny_ib_high": 20275.00,
+    "ny_ib_low": 20210.00,
+    "atr14": 185.50
+  },
+  "_expected": {
+    "strongest_resistance_count": 2,
+    "weakest_resistance_count": 2,
+    "strongest_support_count": 2,
+    "weakest_support_count": 2,
+    "action_state": "STAND_DOWN"
+  }
+}
