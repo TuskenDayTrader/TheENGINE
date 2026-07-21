@@ -5,7 +5,7 @@ import logging
 import uuid
 from enum import Enum
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from packages.core.models import AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
@@ -14,6 +14,7 @@ from packages.core.scoring import score
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+ALLOWED_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
 
 class Timeframe(str, Enum):
@@ -88,6 +89,13 @@ class AnalyzeResponse(BaseModel):
     poster_text: str
 
 
+class AnalyzeImageResponse(BaseModel):
+    filename: str
+    content_type: str
+    size_bytes: int
+    message: str
+
+
 def _confidence_to_float(tag: ConvictionTag) -> float:
     if tag == ConvictionTag.HIGH:
         return 0.9
@@ -121,6 +129,30 @@ def _map_response(result: AnalysisResult, current_price: float, atr_14: float | 
         action_state=result.action_state.value,
         confidence=_confidence_to_float(result.confidence),
         poster_text=build_poster(result),
+    )
+
+
+@router.post("/analyze-image", response_model=AnalyzeImageResponse)
+async def analyze_image(
+    file: UploadFile = File(...),
+    ticker: str | None = Form(default=None),
+    timeframe: str | None = Form(default=None),
+    lookback_days: int | None = Form(default=None),
+    date_et: str | None = Form(default=None),
+) -> AnalyzeImageResponse:
+    _ = (ticker, timeframe, lookback_days, date_et)
+    if file.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file content type. Allowed types: image/png, image/jpeg, image/jpg, image/webp",
+        )
+
+    contents = await file.read()
+    return AnalyzeImageResponse(
+        filename=file.filename or "",
+        content_type=file.content_type,
+        size_bytes=len(contents),
+        message="upload received",
     )
 
 
