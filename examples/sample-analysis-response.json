@@ -1,0 +1,24 @@
+{
+  "strongest_resistance": [
+    "29,195-29,205",
+    "29,320-29,350"
+  ],
+  "weakest_resistance": [
+    "29,115-29,125",
+    "29,165-29,175"
+  ],
+  "strongest_support": [
+    "29,000-29,020",
+    "28,885-28,905"
+  ],
+  "weakest_support": [
+    "28,955-28,970",
+    "28,760-28,780"
+  ],
+  "action_state": "STAND_DOWN",
+  "confidence": "bootstrap-sample",
+  "rationale": [
+    "Sample output placeholder for future scoring integration.",
+    "Included for developer onboarding and contract reference only."
+  ]
+}

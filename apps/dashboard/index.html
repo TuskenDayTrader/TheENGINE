@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TheENGINE developer bootstrap dashboard</title>
+    <style>
+      body {
+        background: #111827;
+        color: #f9fafb;
+        font-family: Arial, Helvetica, sans-serif;
+        margin: 0;
+        padding: 2rem;
+      }
+
+      main {
+        margin: 0 auto;
+        max-width: 48rem;
+      }
+
+      form,
+      section {
+        background: rgba(31, 41, 55, 0.95);
+        border: 1px solid #374151;
+        border-radius: 0.75rem;
+        margin-top: 1rem;
+        padding: 1rem;
+      }
+
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+      }
+
+      input {
+        border: 1px solid #4b5563;
+        border-radius: 0.5rem;
+        box-sizing: border-box;
+        margin-top: 0.25rem;
+        padding: 0.75rem;
+        width: 100%;
+      }
+
+      button {
+        background: #dc2626;
+        border: 0;
+        border-radius: 0.5rem;
+        color: #fff;
+        cursor: pointer;
+        font-weight: 700;
+        margin-top: 1rem;
+        padding: 0.75rem 1rem;
+      }
+
+      code {
+        color: #fca5a5;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>TheENGINE developer bootstrap dashboard</h1>
+      <p>
+        This local shell is a lightweight place to iterate on the future upload workflow without changing any
+        trading logic in this PR.
+      </p>
+
+      <form>
+        <label>
+          Ticker(s)
+          <input type="text" placeholder="NQ, ES" />
+        </label>
+        <label>
+          Timeframe
+          <input type="text" placeholder="30m" />
+        </label>
+        <label>
+          Lookback days
+          <input type="number" min="1" placeholder="14" />
+        </label>
+        <label>
+          Sample payload
+          <input type="file" />
+        </label>
+        <button type="button">Bootstrap only</button>
+      </form>
+
+      <section>
+        <h2>Local iteration tips</h2>
+        <ul>
+          <li>Run <code>npm run dev:api</code> to serve the sample payload and response JSON.</li>
+          <li>Run <code>npm run dev:app</code> to open this dashboard shell locally.</li>
+          <li>Use <code>examples/sample-analysis-payload.json</code> when wiring the first real analysis endpoint.</li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "date_et": "2026-07-21",
+  "ticker": "NQU2026",
+  "timeframe": "30m",
+  "lookback_days": 14,
+  "current_price": 29142.25,
+  "levels": {
+    "pdh": 29198.5,
+    "pdl": 28701.25,
+    "prior_settle": 29117.25,
+    "rth_open": 29110.25,
+    "globex_high": 29195.25,
+    "globex_low": 28701,
+    "asia_high": 28804,
+    "asia_low": 28701,
+    "london_high": 29195.25,
+    "london_low": 28803,
+    "ny_high": 29191.25,
+    "ny_low": 28751.25,
+    "asia_ib_high": 28804,
+    "asia_ib_low": 28725.5,
+    "london_ib_high": 29040.25,
+    "london_ib_low": 28854.75,
+    "ny_ib_high": 29191,
+    "ny_ib_low": 28906,
+    "atr14": 57.75
+  }
+}
