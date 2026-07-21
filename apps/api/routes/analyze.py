@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import uuid
 from enum import Enum
 
 from fastapi import APIRouter, HTTPException
@@ -96,6 +97,7 @@ def _confidence_to_float(tag: ConvictionTag) -> float:
 
 
 def _map_level(level: LevelDecision, current_price: float, atr14: float | None) -> ResponseLevel:
+    """Map a core level using atr14 (14-period ATR) for normalized distance."""
     distance_atr = None
     if atr14 and atr14 > 0:
         distance_atr = abs(level.price - current_price) / atr14
@@ -136,9 +138,15 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             )
         )
     except Exception:
-        logger.exception("Scoring failed for ticker=%s date=%s", payload.ticker, payload.date_et)
+        error_id = uuid.uuid4().hex[:8]
+        logger.exception(
+            "Scoring failed for ticker=%s date=%s error_id=%s",
+            payload.ticker,
+            payload.date_et,
+            error_id,
+        )
         raise HTTPException(
             status_code=500,
-            detail="An internal error occurred during analysis. Please try again.",
+            detail=f"An internal error occurred during analysis. Please try again. Ref: {error_id}",
         )
     return _map_response(result, payload.current_price, payload.levels.atr14)
