@@ -1,0 +1,35 @@
+{
+  "_comment": "ES July 21 2026 sample — price near prior settle/NY IB low confluence (support), moderate resistance. Expected: ACTIVE_LONG.",
+  "date_et": "2026-07-21",
+  "ticker": "ESU2026",
+  "timeframe": "30m",
+  "lookback_days": 14,
+  "current_price": 5620.50,
+  "levels": {
+    "pdh": 5665.75,
+    "pdl": 5588.25,
+    "prior_settle": 5628.50,
+    "rth_open": 5622.00,
+    "globex_high": 5660.25,
+    "globex_low": 5590.00,
+    "asia_high": 5638.00,
+    "asia_low": 5598.50,
+    "london_high": 5655.50,
+    "london_low": 5601.25,
+    "ny_high": 5662.00,
+    "ny_low": 5610.00,
+    "asia_ib_high": 5635.00,
+    "asia_ib_low": 5600.00,
+    "london_ib_high": 5648.00,
+    "london_ib_low": 5604.25,
+    "ny_ib_high": 5650.00,
+    "ny_ib_low": 5615.00,
+    "atr14": 52.25
+  },
+  "_expected": {
+    "strongest_resistance_count": 2,
+    "weakest_resistance_count": 2,
+    "strongest_support_count": 2,
+    "weakest_support_count": 2
+  }
+}

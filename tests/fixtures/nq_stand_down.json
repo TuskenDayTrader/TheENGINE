@@ -1,0 +1,36 @@
+{
+  "_comment": "NQ stand-down scenario — price exactly mid-range, resistance and support scores balanced. Expected: STAND_DOWN.",
+  "date_et": "2026-07-18",
+  "ticker": "NQU2026",
+  "timeframe": "30m",
+  "lookback_days": 14,
+  "current_price": 20500.00,
+  "levels": {
+    "pdh": 20610.00,
+    "pdl": 20390.00,
+    "prior_settle": 20500.00,
+    "rth_open": 20505.00,
+    "globex_high": 20605.00,
+    "globex_low": 20395.00,
+    "asia_high": 20560.00,
+    "asia_low": 20440.00,
+    "london_high": 20590.00,
+    "london_low": 20415.00,
+    "ny_high": 20600.00,
+    "ny_low": 20400.00,
+    "asia_ib_high": 20555.00,
+    "asia_ib_low": 20445.00,
+    "london_ib_high": 20580.00,
+    "london_ib_low": 20420.00,
+    "ny_ib_high": 20575.00,
+    "ny_ib_low": 20425.00,
+    "atr14": 210.00
+  },
+  "_expected": {
+    "strongest_resistance_count": 2,
+    "weakest_resistance_count": 2,
+    "strongest_support_count": 2,
+    "weakest_support_count": 2,
+    "action_state": "STAND_DOWN"
+  }
+}
