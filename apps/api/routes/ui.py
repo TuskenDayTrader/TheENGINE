@@ -15,4 +15,4 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 @router.get("/app", response_class=HTMLResponse, tags=["UI"])
 async def app_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "app.html")
+    return templates.TemplateResponse(request, "app.html", {})

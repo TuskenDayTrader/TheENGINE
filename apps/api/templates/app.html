@@ -93,7 +93,7 @@
     function showResult(data) {
       resultCard.style.display = 'block';
       if (data.action_state) addRow('Action State', data.action_state);
-      if (data.confidence != null) addRow('Confidence', (data.confidence * 100).toFixed(0) + '%');
+      if (typeof data.confidence === 'number') addRow('Confidence', (data.confidence * 100).toFixed(0) + '%');
       if (data.poster_text) {
         posterEl.textContent = data.poster_text;
         posterEl.style.display = 'block';
