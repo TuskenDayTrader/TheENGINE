@@ -141,7 +141,8 @@ async def analyze_image(
     date_et: str | None = Form(default=None),
 ) -> AnalyzeImageResponse:
     _ = (ticker, timeframe, lookback_days, date_et)
-    if file.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
+    content_type = file.content_type or ""
+    if content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
             detail="Unsupported file content type. Allowed types: image/png, image/jpeg, image/jpg, image/webp",
@@ -150,7 +151,7 @@ async def analyze_image(
     contents = await file.read()
     return AnalyzeImageResponse(
         filename=file.filename or "",
-        content_type=file.content_type,
+        content_type=content_type,
         size_bytes=len(contents),
         message="upload received",
     )
