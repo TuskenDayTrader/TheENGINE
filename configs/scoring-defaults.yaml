@@ -1,0 +1,73 @@
+# scoring-defaults.yaml
+# ---------------------------------------------------------------------------
+# Default scoring weights for the 2+2+2+2 level-selection engine.
+#
+# Weight rationale
+# ----------------
+# confluence_weight: 0.40
+#   Highest weight because stacked, independent level sources at the same
+#   price zone are the single strongest statistical predictor of a meaningful
+#   price reaction.  A PDH that also coincides with the Globex high and an
+#   IB extreme carries far more conviction than any single level alone.
+#
+# session_weight: 0.25
+#   Institutional participation differs significantly across sessions.
+#   NY (US equity open) carries the deepest volume and the sharpest moves;
+#   levels formed there have the highest follow-through rate.  The weight
+#   hierarchy (NY > London > Globex > Asia > prior-day reference) reflects
+#   historical observed significance.
+#
+# recency_weight: 0.20
+#   Levels formed in the most recent session have had the least time to be
+#   "tested and absorbed" by market participants.  A fresh NY IB high is
+#   more likely to produce a defined reaction than a week-old PDH.
+#
+# proximity_weight: 0.15
+#   Lowest weight because distance from current price is already baked into
+#   the resistance / support classification step.  Proximity refines ranking
+#   *within* a class rather than acting as a primary selector.  Normalising
+#   by ATR14 makes this factor instrument-agnostic.
+#
+# ---------------------------------------------------------------------------
+
+weights:
+  confluence_weight: 0.40
+  session_weight: 0.25
+  recency_weight: 0.20
+  proximity_weight: 0.15
+
+# Session relevance scores (0.0 – 1.0, higher = more relevant)
+session_scores:
+  ny: 1.00
+  london: 0.85
+  globex: 0.70
+  asia: 0.65
+  prior_day: 0.50
+  neutral: 0.55
+
+# Recency scores (0.0 – 1.0, higher = more recent)
+recency_scores:
+  ny: 1.00
+  london: 0.85
+  globex: 0.80
+  asia: 0.70
+  prior_day: 0.50
+  neutral: 0.55
+
+# Confluence grouping
+confluence:
+  threshold_atr_fraction: 0.25   # group levels within 25 % of ATR14
+  threshold_pct_fallback: 0.001  # 0.1 % of price when ATR14 unavailable
+  max_confluence_count: 6        # normalisation cap
+
+# Action-state thresholds
+action_state:
+  proximity_threshold_atr: 0.75  # level must be within 0.75 × ATR14
+  score_dominance_ratio: 1.15    # stronger side score / weaker side score
+  fallback_proximity_pct: 0.005  # 0.5 % of price when ATR14 unavailable
+
+# Conviction tag thresholds (applied to composite score)
+conviction:
+  high_threshold: 0.70
+  moderate_threshold: 0.45
+  # below moderate_threshold → LOW
