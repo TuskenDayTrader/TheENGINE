@@ -96,11 +96,11 @@ def _confidence_to_float(tag: ConvictionTag) -> float:
     return 0.3
 
 
-def _map_level(level: LevelDecision, current_price: float, atr14: float | None) -> ResponseLevel:
-    """Map a core level using atr14 (14-period ATR) for normalized distance."""
+def _map_level(level: LevelDecision, current_price: float, atr_14: float | None) -> ResponseLevel:
+    """Map a core level using a precomputed 14-period ATR value for normalized distance."""
     distance_atr = None
-    if atr14 and atr14 > 0:
-        distance_atr = abs(level.price - current_price) / atr14
+    if atr_14 and atr_14 > 0:
+        distance_atr = abs(level.price - current_price) / atr_14
     return ResponseLevel(
         label="+".join(level.sources),
         price=level.price,
@@ -110,14 +110,14 @@ def _map_level(level: LevelDecision, current_price: float, atr14: float | None) 
     )
 
 
-def _map_response(result: AnalysisResult, current_price: float, atr14: float | None) -> AnalyzeResponse:
+def _map_response(result: AnalysisResult, current_price: float, atr_14: float | None) -> AnalyzeResponse:
     return AnalyzeResponse(
         ticker=result.ticker,
         date_et=result.date_et,
-        strongest_resistance=[_map_level(x, current_price, atr14) for x in result.strongest_resistance],
-        weakest_resistance=[_map_level(x, current_price, atr14) for x in result.weakest_resistance],
-        strongest_support=[_map_level(x, current_price, atr14) for x in result.strongest_support],
-        weakest_support=[_map_level(x, current_price, atr14) for x in result.weakest_support],
+        strongest_resistance=[_map_level(x, current_price, atr_14) for x in result.strongest_resistance],
+        weakest_resistance=[_map_level(x, current_price, atr_14) for x in result.weakest_resistance],
+        strongest_support=[_map_level(x, current_price, atr_14) for x in result.strongest_support],
+        weakest_support=[_map_level(x, current_price, atr_14) for x in result.weakest_support],
         action_state=result.action_state.value,
         confidence=_confidence_to_float(result.confidence),
         poster_text=build_poster(result),
