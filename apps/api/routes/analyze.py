@@ -140,6 +140,7 @@ async def analyze_image(
     lookback_days: int | None = Form(default=None),
     date_et: str | None = Form(default=None),
 ) -> AnalyzeImageResponse:
+    # Reserved for future OCR/context handling; accepted now as part of the upload contract.
     _ = (ticker, timeframe, lookback_days, date_et)
     content_type = file.content_type or ""
     if content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
