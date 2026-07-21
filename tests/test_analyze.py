@@ -91,3 +91,44 @@ def test_health_check():
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_analyze_image_valid_upload_returns_200():
+    resp = client.post(
+        "/analyze-image",
+        files={"file": ("chart.png", b"\x89PNG\r\n\x1a\nfakepng", "image/png")},
+        data={
+            "ticker": "NQ",
+            "timeframe": "30m",
+            "lookback_days": "5",
+            "date_et": "2026-07-21",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data == {
+        "filename": "chart.png",
+        "content_type": "image/png",
+        "size_bytes": 15,
+        "message": "upload received",
+    }
+
+
+def test_analyze_image_missing_file_returns_422():
+    resp = client.post("/analyze-image", data={"ticker": "NQ"})
+    assert resp.status_code == 422
+
+
+def test_analyze_image_invalid_content_type_returns_400():
+    resp = client.post(
+        "/analyze-image",
+        files={"file": ("notes.txt", b"not-an-image", "text/plain")},
+    )
+    assert resp.status_code == 400
+
+
+def test_analyze_image_openapi_uses_multipart_form_data():
+    schema = app.openapi()
+    request_body = schema["paths"]["/analyze-image"]["post"]["requestBody"]
+    assert "multipart/form-data" in request_body["content"]
