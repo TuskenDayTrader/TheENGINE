@@ -4,8 +4,7 @@ import datetime as dt
 import logging
 from enum import Enum
 
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from packages.core.models import AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
@@ -138,8 +137,8 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         )
     except Exception:
         logger.exception("Scoring failed for ticker=%s date=%s", payload.ticker, payload.date_et)
-        return JSONResponse(
+        raise HTTPException(
             status_code=500,
-            content={"detail": "An internal error occurred during analysis. Please try again."},
+            detail="An internal error occurred during analysis. Please try again.",
         )
     return _map_response(result, payload.current_price, payload.levels.atr14)
