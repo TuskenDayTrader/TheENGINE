@@ -90,12 +90,31 @@
       resultRows.appendChild(div);
     }
 
-    function showResult(data) {
+    function showResult(analysis) {
       resultCard.style.display = 'block';
-      if (data.action_state) addRow('Action State', data.action_state);
-      if (typeof data.confidence === 'number') addRow('Confidence', (data.confidence * 100).toFixed(0) + '%');
-      if (data.poster_text) {
-        posterEl.textContent = data.poster_text;
+      resultRows.innerHTML = '';
+      if (analysis.action_state) addRow('Action State', analysis.action_state);
+      if (typeof analysis.confidence === 'number') {
+        addRow('Confidence', (analysis.confidence * 100).toFixed(0) + '%');
+      }
+      if (analysis.strongest_resistance && analysis.strongest_resistance.length) {
+        const r = analysis.strongest_resistance[0];
+        addRow('Strongest Resistance', r.price.toFixed(2) + ' (' + r.label + ')');
+      }
+      if (analysis.weakest_resistance && analysis.weakest_resistance.length) {
+        const r = analysis.weakest_resistance[0];
+        addRow('Weakest Resistance', r.price.toFixed(2) + ' (' + r.label + ')');
+      }
+      if (analysis.strongest_support && analysis.strongest_support.length) {
+        const s = analysis.strongest_support[0];
+        addRow('Strongest Support', s.price.toFixed(2) + ' (' + s.label + ')');
+      }
+      if (analysis.weakest_support && analysis.weakest_support.length) {
+        const s = analysis.weakest_support[0];
+        addRow('Weakest Support', s.price.toFixed(2) + ' (' + s.label + ')');
+      }
+      if (analysis.poster_text) {
+        posterEl.textContent = analysis.poster_text;
         posterEl.style.display = 'block';
       }
     }
@@ -120,9 +139,8 @@
       }
 
       submitBtn.disabled = true;
-      showBanner('Uploading screenshot…', 'info');
+      showBanner('Uploading and analyzing screenshot…', 'info');
 
-      // Step 1: POST to /analyze-image
       const fd = new FormData();
       fd.append('file', fileInput.files[0]);
       fd.append('ticker', ticker);
@@ -130,30 +148,46 @@
       fd.append('lookback_days', lookback);
       if (dateEt) fd.append('date_et', dateEt);
 
-      let uploadOk = false;
       try {
-        const res = await fetch('/analyze-image', { method: 'POST', body: fd });
-        if (res.ok) {
-          uploadOk = true;
-          showBanner('Screenshot intake complete; level extraction not enabled yet.', 'ok');
+        const res  = await fetch('/analyze-image', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          showBanner('Upload failed: ' + (data.detail || res.statusText), 'error');
+          return;
+        }
+
+        if (data.analysis) {
+          // Full extraction succeeded — show result card
+          const pct = typeof data.extraction_confidence === 'number'
+            ? ' (confidence ' + (data.extraction_confidence * 100).toFixed(0) + '%)'
+            : '';
+          if (data.extraction_warning) {
+            showBanner('⚠️ Partial result — low confidence' + pct + ': ' + data.extraction_warning, 'warning');
+          } else {
+            showBanner('Analysis complete' + pct + '.', 'ok');
+          }
+          showResult(data.analysis);
         } else {
-          const err = await res.json().catch(() => ({}));
-          showBanner('Upload failed: ' + (err.detail || res.statusText), 'error');
+          // Extraction did not produce usable levels
+          if (data.extraction_warning) {
+            showBanner('⚠️ ' + data.extraction_warning, 'warning');
+          } else {
+            showBanner('Screenshot received; level extraction not available for this image.', 'ok');
+          }
+          resultCard.style.display = 'block';
+          fallbackEl.textContent = data.extraction_warning
+            ? 'Partial analysis only: ' + data.extraction_warning +
+              ' To run a full analysis, supply trading levels via the /analyze API.'
+            : 'Screenshot intake complete; level extraction not enabled for this image type. ' +
+              'To run a full confluence analysis, supply trading levels via the /analyze API.';
+          fallbackEl.style.display = 'block';
         }
       } catch (err) {
-        showBanner('Network error during upload: ' + err.message, 'error');
+        showBanner('Network error: ' + err.message, 'error');
       } finally {
         submitBtn.disabled = false;
       }
-
-      if (!uploadOk) return;
-
-      // Step 2: show fallback — full /analyze requires trading levels not available from image alone
-      resultCard.style.display = 'block';
-      fallbackEl.textContent =
-        'Screenshot intake complete; level extraction not enabled yet. ' +
-        'To run a full confluence analysis, supply trading levels via the /analyze API.';
-      fallbackEl.style.display = 'block';
     });
   </script>
 </body>
