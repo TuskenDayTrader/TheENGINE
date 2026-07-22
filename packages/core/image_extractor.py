@@ -295,7 +295,7 @@ def _detect_horizontal_lines(
     noise_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
 
     # ── Hough parameters ─────────────────────────────────────────────────────
-    hough_angle_sin = float(np.sin(_HOUGH_ANGLE_MAX_DEG * np.pi / 180.0))
+    hough_angle_sin = np.sin(np.radians(_HOUGH_ANGLE_MAX_DEG))
     hough_gap = max(5, int(chart_w * 0.02))        # 2 % gap tolerance
     hough_threshold = max(20, min_line_width // 3)
 
@@ -330,10 +330,10 @@ def _detect_horizontal_lines(
         )
         if hough_result is not None:
             for seg in hough_result:
-                x1, y1, x2, y2 = int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3])
+                x1, y1, x2, y2 = seg.tolist()
                 dx = abs(x2 - x1)
                 dy = abs(y2 - y1)
-                length = float(np.sqrt(dx * dx + dy * dy))
+                length = np.hypot(dx, dy)
                 hough_raw += 1
                 if length > 0 and dy / length <= hough_angle_sin:
                     center_y = (y1 + y2) // 2
