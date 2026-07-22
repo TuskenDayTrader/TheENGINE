@@ -98,6 +98,34 @@ _ROI_BOTTOM_FRACTION: float = 0.90  # keep up to 90 %; bottom 10 %: ATR / sessio
 # Hough near-horizontal tolerance in degrees
 _HOUGH_ANGLE_MAX_DEG: float = 5.0
 
+# ---------------------------------------------------------------------------
+# July 22 2026 TradingView detection-improvement constants
+# ---------------------------------------------------------------------------
+
+# Rightmost fraction of CHART AREA (plot area) excluded from line candidate
+# detection.  Avoids the current-price label/arrow artefact that sits at the
+# far-right edge of the plot.  Axis OCR logic (which uses the rightmost 15 %
+# of the full image) is deliberately kept unchanged.
+_CHART_RIGHT_EXCLUSION_FRACTION: float = 0.03  # last 3 %
+
+# Minimum width/height aspect ratio for contour bounding boxes.  Prevents
+# wide-but-tall session-box blobs from being misclassified as horizontal lines.
+_CONTOUR_MIN_ASPECT: float = 3.0
+
+# Maximum absolute |dy| in pixels for a Hough segment to pass the slope
+# filter.  Complements the angular tolerance for short or diagonal segments.
+_HOUGH_MAX_SLOPE_DY_PX: int = 2
+
+# BGR-space Euclidean distance threshold for the RGB-distance colour fallback.
+# Covers neon green/red pixels that survive JPEG compression artefacts or
+# colour-profile shifts outside the HSV and LAB detection windows.
+_BGR_DISTANCE_THRESHOLD: float = 60.0
+
+# A mask blob whose height exceeds this multiple of ``max_line_height`` is
+# classified as a filled session/overlay rectangle and suppressed before
+# Hough detection so its top/bottom edges are not reported as price levels.
+_BOX_HEIGHT_FACTOR: int = 3
+
 # Synthetic level offsets when no extracted levels exist on one side
 _SYNTHETIC_RESISTANCE_OFFSET: float = 1.001
 _SYNTHETIC_SUPPORT_OFFSET: float = 0.999
@@ -151,7 +179,10 @@ class ExtractionResult:
     #: Optional diagnostic counters populated when ``debug=True`` is passed to
     #: :func:`extract_from_image`.  Keys: ``image_size``, ``chart_roi``,
     #: ``green_mask_pixels``, ``red_mask_pixels``, ``contour_segments_raw``,
-    #: ``hough_segments_raw``, ``segments_before_dedup``, ``segments_after_dedup``.
+    #: ``hough_segments_raw``, ``raw_green_candidates``, ``raw_red_candidates``,
+    #: ``filtered_by_slope``, ``filtered_by_length``,
+    #: ``segments_before_dedup``, ``segments_after_dedup``,
+    #: ``kept_lines`` (list of dicts with ``y_pixel``, ``color``, ``price``).
     debug_info: Optional[dict] = None
 
 
@@ -205,6 +236,77 @@ def _compute_lab_mask(
     return (dist <= threshold).astype(np.uint8) * 255
 
 
+def _compute_bgr_mask(
+    chart_bgr: "np.ndarray",
+    target_bgr: Tuple[int, int, int],
+    threshold: float,
+) -> "np.ndarray":
+    """
+    Return a binary mask where each pixel's BGR Euclidean distance to
+    *target_bgr* is ≤ *threshold*.
+
+    Provides an RGB-space fallback that complements the HSV and LAB passes
+    for detecting neon green/red line pixels on TradingView's dark theme
+    background, including pixels affected by JPEG compression artefacts or
+    colour-profile shifts outside the HSV and LAB detection windows.
+
+    Parameters
+    ----------
+    chart_bgr:
+        Source image in BGR channel order (uint8, same shape as source).
+    target_bgr:
+        Target colour in BGR channel order.
+    threshold:
+        Maximum acceptable Euclidean distance in BGR space.
+    """
+    target_arr = np.array(list(target_bgr), dtype=np.float32)
+    diff = chart_bgr.astype(np.float32) - target_arr
+    dist = np.sqrt((diff * diff).sum(axis=2))
+    return (dist <= threshold).astype(np.uint8) * 255
+
+
+def _merge_collinear_fragments(
+    segments: List[Tuple[int, str]], tol: int = 10
+) -> List[Tuple[int, str]]:
+    """Merge nearby collinear fragment y-positions into a single representative.
+
+    Segments whose y-coordinates lie within *tol* pixels of each other are
+    grouped into a cluster.  Each cluster is collapsed into a single
+    ``(median_y, dominant_color)`` tuple.  This handles the common case where
+    a single horizontal line generates multiple nearby detections from the
+    contour and Hough detection paths.
+
+    Parameters
+    ----------
+    segments:
+        List of ``(y_pixel, color_label)`` tuples (unsorted is fine).
+    tol:
+        Maximum pixel gap between consecutive y-values within a cluster.
+
+    Returns
+    -------
+    Merged list with at most ``len(segments)`` entries.
+    """
+    if not segments:
+        return []
+    sorted_segs = sorted(segments, key=lambda x: x[0])
+    groups: List[List[Tuple[int, str]]] = [[sorted_segs[0]]]
+    for y, color in sorted_segs[1:]:
+        if y - groups[-1][-1][0] <= tol:
+            groups[-1].append((y, color))
+        else:
+            groups.append([(y, color)])
+    result: List[Tuple[int, str]] = []
+    for group in groups:
+        ys = [y for y, _ in group]
+        color_counts: dict = {}
+        for _, c in group:
+            color_counts[c] = color_counts.get(c, 0) + 1
+        dominant = max(color_counts, key=lambda k: color_counts[k])
+        result.append((sorted(ys)[len(ys) // 2], dominant))
+    return result
+
+
 def _detect_horizontal_lines(
     img: "np.ndarray",
     debug_out: Optional[dict] = None,
@@ -220,13 +322,25 @@ def _detect_horizontal_lines(
 
     Detection is restricted to the chart plot area (right price-axis strip,
     top title/watermark area and bottom session/ATR panel are excluded).
+    An additional right-edge exclusion zone (last ``_CHART_RIGHT_EXCLUSION_FRACTION``
+    of the chart width) prevents the current-price label/arrow from being
+    reported as a price level.
+
+    Large filled blobs (session/overlay boxes) are suppressed before Hough
+    detection so their top and bottom edges are not mistaken for horizontal
+    levels.
+
+    Three colour passes are used: HSV, LAB-distance, and BGR-distance (each
+    OR-combined) for maximum robustness against anti-aliasing and compression.
 
     Parameters
     ----------
     img:
         BGR image array from ``cv2.imdecode``.
     debug_out:
-        Optional dict populated in-place with diagnostic counters.
+        Optional dict populated in-place with diagnostic counters.  New keys
+        populated by this function: ``raw_green_candidates``,
+        ``raw_red_candidates``, ``filtered_by_slope``, ``filtered_by_length``.
 
     Returns
     -------
@@ -253,21 +367,30 @@ def _detect_horizontal_lines(
     min_line_width = max(10, int(chart_w * _LINE_MIN_WIDTH_FRACTION))
     max_line_height = max(5, chart_h // 100)
 
+    # Right-edge exclusion: column index beyond which pixels are zeroed out in
+    # the processed mask.  This stops the current-price label/arrow (drawn at
+    # the far-right of the plot area) from being detected as a price level.
+    # Axis OCR uses the full image and is not affected by this value.
+    detect_right = int(chart_w * (1.0 - _CHART_RIGHT_EXCLUSION_FRACTION))
+
     hsv = cv2.cvtColor(chart, cv2.COLOR_BGR2HSV)
 
-    # Pre-compute LAB image once for second-pass detection
+    # Pre-compute LAB image once for LAB second-pass detection
     chart_lab = cv2.cvtColor(chart, cv2.COLOR_BGR2Lab).astype(np.float32)
 
-    # ── Green mask: HSV first pass  OR  LAB second pass ──────────────────────
+    # ── Green mask: HSV  OR  LAB  OR  BGR (triple-pass) ──────────────────────
     green_mask_hsv = cv2.inRange(
         hsv,
         np.array(_GREEN_LOWER, dtype=np.uint8),
         np.array(_GREEN_UPPER, dtype=np.uint8),
     )
     green_mask_lab = _compute_lab_mask(chart_lab, _GREEN_BGR_TARGET, _LAB_DISTANCE_THRESHOLD)
-    green_mask = cv2.bitwise_or(green_mask_hsv, green_mask_lab)
+    green_mask_bgr = _compute_bgr_mask(chart, _GREEN_BGR_TARGET, _BGR_DISTANCE_THRESHOLD)
+    green_mask = cv2.bitwise_or(
+        cv2.bitwise_or(green_mask_hsv, green_mask_lab), green_mask_bgr
+    )
 
-    # ── Red mask: HSV (two hue ranges)  OR  LAB second pass ──────────────────
+    # ── Red mask: HSV (two hue ranges)  OR  LAB  OR  BGR (triple-pass) ───────
     red_mask_a = cv2.inRange(
         hsv,
         np.array(_RED_LOWER_A, dtype=np.uint8),
@@ -279,8 +402,10 @@ def _detect_horizontal_lines(
         np.array(_RED_UPPER_B, dtype=np.uint8),
     )
     red_mask_lab = _compute_lab_mask(chart_lab, _RED_BGR_TARGET, _LAB_DISTANCE_THRESHOLD)
+    red_mask_bgr = _compute_bgr_mask(chart, _RED_BGR_TARGET, _BGR_DISTANCE_THRESHOLD)
     red_mask = cv2.bitwise_or(
-        cv2.bitwise_or(red_mask_a, red_mask_b), red_mask_lab
+        cv2.bitwise_or(cv2.bitwise_or(red_mask_a, red_mask_b), red_mask_lab),
+        red_mask_bgr,
     )
 
     if debug_out is not None:
@@ -302,11 +427,39 @@ def _detect_horizontal_lines(
     results: List[Tuple[int, str]] = []
     contour_raw = 0
     hough_raw = 0
+    raw_green_candidates = 0
+    raw_red_candidates = 0
+    filtered_by_slope = 0
+    filtered_by_length = 0
+
+    # Height threshold above which a mask blob is classified as a filled
+    # session/overlay rectangle and suppressed before Hough detection.
+    box_threshold_h = max_line_height * _BOX_HEIGHT_FACTOR
 
     for mask, color_label in [(green_mask, "green"), (red_mask, "red")]:
+        color_raw = 0
+        color_slope_filtered = 0
+        color_length_filtered = 0
+
         # Morphology: close to reconnect fragments, open to strip noise
         closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, h_close_kernel)
         processed = cv2.morphologyEx(closed, cv2.MORPH_OPEN, noise_kernel)
+
+        # ── Session-box suppression ───────────────────────────────────────────
+        # Any connected component whose height exceeds box_threshold_h is treated
+        # as a filled overlay rectangle (e.g., a session box) and removed from
+        # the mask so Hough does not detect its top/bottom edges as price levels.
+        cnts_box, _ = cv2.findContours(
+            processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for cnt in cnts_box:
+            _, _, _, ch_b = cv2.boundingRect(cnt)
+            if ch_b > box_threshold_h:
+                cv2.drawContours(processed, [cnt], -1, 0, thickness=-1)
+
+        # ── Right-edge exclusion ──────────────────────────────────────────────
+        if detect_right < chart_w:
+            processed[:, detect_right:] = 0
 
         # Method A: contour bounding boxes (wide & flat = horizontal segment)
         contours, _ = cv2.findContours(
@@ -314,10 +467,19 @@ def _detect_horizontal_lines(
         )
         for cnt in contours:
             x, y, cw, ch = cv2.boundingRect(cnt)
+            color_raw += 1
             contour_raw += 1
-            if cw >= min_line_width and ch <= max_line_height:
+            # Aspect-ratio guard: width must be at least _CONTOUR_MIN_ASPECT × height.
+            # This rejects any remaining wide-but-tall blobs (partial session boxes).
+            aspect_ok = ch == 0 or (cw / ch >= _CONTOUR_MIN_ASPECT)
+            if cw >= min_line_width and ch <= max_line_height and aspect_ok:
                 center_y = y + ch // 2
                 results.append((center_y + roi_top, color_label))
+            else:
+                if cw < min_line_width:
+                    color_length_filtered += 1
+                else:
+                    color_slope_filtered += 1
 
         # Method B: probabilistic Hough lines (near-horizontal)
         hough_result = cv2.HoughLinesP(
@@ -334,17 +496,44 @@ def _detect_horizontal_lines(
                 dx = abs(x2 - x1)
                 dy = abs(y2 - y1)
                 length = np.hypot(dx, dy)
+                color_raw += 1
                 hough_raw += 1
-                if length > 0 and dy / length <= hough_angle_sin:
+                # Dual slope filter: angular threshold AND absolute |dy| limit.
+                # The absolute limit prevents short segments with acceptable angle
+                # but non-trivial pixel slope from contaminating the results.
+                slope_ok = (
+                    length > 0
+                    and dy / length <= hough_angle_sin
+                    and dy <= _HOUGH_MAX_SLOPE_DY_PX
+                )
+                if slope_ok:
                     center_y = (y1 + y2) // 2
                     results.append((center_y + roi_top, color_label))
+                else:
+                    color_slope_filtered += 1
+
+        if color_label == "green":
+            raw_green_candidates = color_raw
+        else:
+            raw_red_candidates = color_raw
+        filtered_by_slope += color_slope_filtered
+        filtered_by_length += color_length_filtered
 
     if debug_out is not None:
         debug_out["contour_segments_raw"] = contour_raw
         debug_out["hough_segments_raw"] = hough_raw
+        debug_out["raw_green_candidates"] = raw_green_candidates
+        debug_out["raw_red_candidates"] = raw_red_candidates
+        debug_out["filtered_by_slope"] = filtered_by_slope
+        debug_out["filtered_by_length"] = filtered_by_length
         debug_out["segments_before_dedup"] = len(results)
 
-    deduped = _deduplicate_lines(results)
+    # Merge nearby collinear fragments before deduplication.  Clusters of
+    # detections within 10 px are collapsed to their median y-position so that
+    # a single physical line generates exactly one output entry.
+    merged = _merge_collinear_fragments(results)
+
+    deduped = _deduplicate_lines(merged)
 
     if debug_out is not None:
         debug_out["segments_after_dedup"] = len(deduped)
@@ -661,7 +850,9 @@ def extract_from_image(
     debug:
         When ``True``, populate ``ExtractionResult.debug_info`` with
         diagnostic counters (image size, chart ROI, mask pixel counts,
-        segment counts before and after filtering).
+        raw/filtered candidate counts, segment counts before and after
+        filtering, and ``kept_lines`` – a list of dicts with ``y_pixel``,
+        ``color``, and ``price`` for each detected level).
 
     Returns
     -------
@@ -699,10 +890,17 @@ def extract_from_image(
 
     # Step 3: Map line y-positions to prices ──────────────────────────────────
     line_prices: List[float] = []
-    for y, _color in lines:
+    kept_lines_debug: List[dict] = []
+    for y, color in lines:
         price = _map_y_to_price(y, axis_points)
-        if price is not None and price > 0:
-            line_prices.append(round(price, 4))
+        mapped_price: Optional[float] = round(price, 4) if (price is not None and price > 0) else None
+        if mapped_price is not None:
+            line_prices.append(mapped_price)
+        if debug and _debug_info is not None:
+            kept_lines_debug.append({"y_pixel": y, "color": color, "price": mapped_price})
+
+    if debug and _debug_info is not None:
+        _debug_info["kept_lines"] = kept_lines_debug
 
     # Step 4: Estimate current price ──────────────────────────────────────────
     current_price, cp_from_axis = _estimate_current_price(img, axis_points, line_prices)
