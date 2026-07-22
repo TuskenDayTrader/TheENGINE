@@ -50,7 +50,11 @@ def test_analyze_es_fixture_success():
     payload = _load_fixture("es_sample.json")
     resp = client.post("/analyze", json=payload)
     assert resp.status_code == 200, resp.text
-    _assert_contract(resp.json())
+    data = resp.json()
+    _assert_contract(data)
+    assert "policy" in data
+    assert data["policy"]["rr_target"] == pytest.approx(1.0)
+    assert data["policy"]["daily_profit_cap_usd"] == pytest.approx(550.0)
 
 
 def test_missing_required_field_returns_422():
@@ -393,3 +397,14 @@ def test_analyze_image_no_debug_param_excludes_debug_info(monkeypatch):
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert "debug_info" not in data
+
+
+def test_analyze_profit_cap_lockout_forces_stand_down():
+    payload = _load_fixture("es_sample.json")
+    payload["realized_pnl_usd"] = 600.0
+    resp = client.post("/analyze", json=payload)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["action_state"] == "STAND_DOWN"
+    assert data["policy"]["lockout_active"] is True
+    assert any("Daily lockout active" in reason for reason in data["policy"]["stand_down_reasons"])
