@@ -61,23 +61,42 @@ from .models import LevelsPayload
 
 # ---------------------------------------------------------------------------
 # TradingView dark-theme HSV colour ranges (OpenCV scale: H 0-179, S/V 0-255)
+# Ranges are intentionally wide to capture anti-aliased line variants.
 # ---------------------------------------------------------------------------
 
-# Green #089981  → BGR(129, 153, 8) → HSV ≈ (85, 242, 153)
-_GREEN_LOWER: Tuple[int, int, int] = (75, 100, 80)
-_GREEN_UPPER: Tuple[int, int, int] = (100, 255, 255)
+# Green #089981 → BGR(129, 153, 8) → HSV ≈ (85, 242, 153)
+_GREEN_LOWER: Tuple[int, int, int] = (60, 30, 30)
+_GREEN_UPPER: Tuple[int, int, int] = (95, 255, 255)
 
-# Red #f23645 → BGR(69, 54, 242) → HSV ≈ (178, 200, 242) and wraps to (0-5)
-_RED_LOWER_A: Tuple[int, int, int] = (0, 80, 100)
-_RED_UPPER_A: Tuple[int, int, int] = (15, 255, 255)
-_RED_LOWER_B: Tuple[int, int, int] = (165, 80, 100)
+# BGR pixel value used for LAB-space second-pass detection
+_GREEN_BGR_TARGET: Tuple[int, int, int] = (129, 153, 8)
+
+# Red #f23645 → BGR(69, 54, 242) → HSV ≈ (178, 200, 242) and wraps near H=0
+_RED_LOWER_A: Tuple[int, int, int] = (0, 30, 40)
+_RED_UPPER_A: Tuple[int, int, int] = (20, 255, 255)
+_RED_LOWER_B: Tuple[int, int, int] = (155, 30, 40)
 _RED_UPPER_B: Tuple[int, int, int] = (180, 255, 255)
 
-# Minimum fraction of image width a colour span must cover to be a "line"
-_LINE_MIN_WIDTH_FRACTION: float = 0.10
+# BGR pixel value used for LAB-space second-pass detection
+_RED_BGR_TARGET: Tuple[int, int, int] = (69, 54, 242)
+
+# LAB-distance threshold for second-pass near-neon colour detection.
+# Covers anti-aliased pixels blended up to ~80 % with a dark background.
+_LAB_DISTANCE_THRESHOLD: float = 50.0
+
+# Minimum fraction of CHART width (plot area only) a segment must span.
+# 3 % catches short recent levels while still rejecting stray pixels.
+_LINE_MIN_WIDTH_FRACTION: float = 0.03
 
 # Rightmost fraction of the image treated as the price axis
 _PRICE_AXIS_FRACTION: float = 0.15
+
+# Chart ROI fractions – areas excluded from line detection:
+_ROI_TOP_FRACTION: float = 0.08     # top 8 %: watermark / title area
+_ROI_BOTTOM_FRACTION: float = 0.90  # keep up to 90 %; bottom 10 %: ATR / session panel
+
+# Hough near-horizontal tolerance in degrees
+_HOUGH_ANGLE_MAX_DEG: float = 5.0
 
 # Synthetic level offsets when no extracted levels exist on one side
 _SYNTHETIC_RESISTANCE_OFFSET: float = 1.001
@@ -129,6 +148,12 @@ class ExtractionResult:
     #: Human-readable warning when confidence < :data:`CONFIDENCE_LOW_THRESHOLD`.
     warning: Optional[str] = None
 
+    #: Optional diagnostic counters populated when ``debug=True`` is passed to
+    #: :func:`extract_from_image`.  Keys: ``image_size``, ``chart_roi``,
+    #: ``green_mask_pixels``, ``red_mask_pixels``, ``contour_segments_raw``,
+    #: ``hough_segments_raw``, ``segments_before_dedup``, ``segments_after_dedup``.
+    debug_info: Optional[dict] = None
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -149,34 +174,100 @@ def _deduplicate_lines(
     return result
 
 
+def _compute_lab_mask(
+    chart_lab: "np.ndarray",
+    target_bgr: Tuple[int, int, int],
+    threshold: float,
+) -> "np.ndarray":
+    """
+    Return a binary mask where each pixel's OpenCV-LAB distance to
+    *target_bgr* is ≤ *threshold*.
+
+    Performs a single-channel Euclidean distance test in CIE L*a*b* space
+    (OpenCV scale), which is more perceptually uniform than BGR and reliably
+    captures anti-aliased variants of the target colour blended with a dark
+    background.
+
+    Parameters
+    ----------
+    chart_lab:
+        Image already converted to OpenCV LAB (float32, same shape as source).
+    target_bgr:
+        Target colour in BGR channel order.
+    threshold:
+        Maximum acceptable OpenCV-LAB Euclidean distance (≈ CIE ΔE units
+        multiplied by 2.55 for the L channel).
+    """
+    target_px = np.array([[list(target_bgr)]], dtype=np.uint8)
+    target_lab = cv2.cvtColor(target_px, cv2.COLOR_BGR2Lab).astype(np.float32)[0, 0]
+    diff = chart_lab - target_lab
+    dist = np.sqrt((diff * diff).sum(axis=2))
+    return (dist <= threshold).astype(np.uint8) * 255
+
+
 def _detect_horizontal_lines(
     img: "np.ndarray",
+    debug_out: Optional[dict] = None,
 ) -> List[Tuple[int, str]]:
     """
     Detect coloured horizontal lines in a TradingView dark-theme chart image.
+
+    Uses two complementary detection methods whose results are merged:
+
+    * **Contour bounding boxes** – wide, flat bounding rectangles after
+      morphological clean-up.
+    * **Probabilistic Hough lines** – near-horizontal line segments.
+
+    Detection is restricted to the chart plot area (right price-axis strip,
+    top title/watermark area and bottom session/ATR panel are excluded).
 
     Parameters
     ----------
     img:
         BGR image array from ``cv2.imdecode``.
+    debug_out:
+        Optional dict populated in-place with diagnostic counters.
 
     Returns
     -------
     list of (y_pixel, color_label) tuples, where ``color_label`` is
-    ``"green"`` or ``"red"``.
+    ``"green"`` or ``"red"``.  y values are in full-image coordinates.
     """
     h, w = img.shape[:2]
-    min_line_width = max(10, int(w * _LINE_MIN_WIDTH_FRACTION))
-    max_line_height = max(5, h // 100)
 
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    # ── Chart ROI: exclude price axis (right), title (top), bottom panel ─────
+    roi_top = int(h * _ROI_TOP_FRACTION)
+    roi_bottom = int(h * _ROI_BOTTOM_FRACTION)
+    roi_right = int(w * (1.0 - _PRICE_AXIS_FRACTION))
+    chart = img[roi_top:roi_bottom, 0:roi_right]
+    chart_h, chart_w = chart.shape[:2]
 
-    green_mask = cv2.inRange(
+    if debug_out is not None:
+        debug_out["chart_roi"] = {
+            "top": roi_top,
+            "bottom": roi_bottom,
+            "left": 0,
+            "right": roi_right,
+        }
+
+    min_line_width = max(10, int(chart_w * _LINE_MIN_WIDTH_FRACTION))
+    max_line_height = max(5, chart_h // 100)
+
+    hsv = cv2.cvtColor(chart, cv2.COLOR_BGR2HSV)
+
+    # Pre-compute LAB image once for second-pass detection
+    chart_lab = cv2.cvtColor(chart, cv2.COLOR_BGR2Lab).astype(np.float32)
+
+    # ── Green mask: HSV first pass  OR  LAB second pass ──────────────────────
+    green_mask_hsv = cv2.inRange(
         hsv,
         np.array(_GREEN_LOWER, dtype=np.uint8),
         np.array(_GREEN_UPPER, dtype=np.uint8),
     )
+    green_mask_lab = _compute_lab_mask(chart_lab, _GREEN_BGR_TARGET, _LAB_DISTANCE_THRESHOLD)
+    green_mask = cv2.bitwise_or(green_mask_hsv, green_mask_lab)
 
+    # ── Red mask: HSV (two hue ranges)  OR  LAB second pass ──────────────────
     red_mask_a = cv2.inRange(
         hsv,
         np.array(_RED_LOWER_A, dtype=np.uint8),
@@ -187,27 +278,78 @@ def _detect_horizontal_lines(
         np.array(_RED_LOWER_B, dtype=np.uint8),
         np.array(_RED_UPPER_B, dtype=np.uint8),
     )
-    red_mask = cv2.bitwise_or(red_mask_a, red_mask_b)
-
-    # Horizontal dilation kernel to bridge short gaps within a line segment
-    h_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT, (min_line_width // 2 + 1, 1)
+    red_mask_lab = _compute_lab_mask(chart_lab, _RED_BGR_TARGET, _LAB_DISTANCE_THRESHOLD)
+    red_mask = cv2.bitwise_or(
+        cv2.bitwise_or(red_mask_a, red_mask_b), red_mask_lab
     )
 
+    if debug_out is not None:
+        debug_out["green_mask_pixels"] = int(cv2.countNonZero(green_mask))
+        debug_out["red_mask_pixels"] = int(cv2.countNonZero(red_mask))
+
+    # ── Morphology kernels ────────────────────────────────────────────────────
+    # Horizontal close: bridges anti-aliased gaps (2 % of chart width, ≥ 15 px)
+    close_w = max(15, int(chart_w * 0.02))
+    h_close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_w, 1))
+    # Horizontal open: strips tiny isolated pixel noise without killing thin lines
+    noise_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
+
+    # ── Hough parameters ─────────────────────────────────────────────────────
+    hough_angle_sin = float(np.sin(_HOUGH_ANGLE_MAX_DEG * np.pi / 180.0))
+    hough_gap = max(5, int(chart_w * 0.02))        # 2 % gap tolerance
+    hough_threshold = max(20, min_line_width // 3)
+
     results: List[Tuple[int, str]] = []
+    contour_raw = 0
+    hough_raw = 0
 
     for mask, color_label in [(green_mask, "green"), (red_mask, "red")]:
-        dilated = cv2.dilate(mask, h_kernel, iterations=1)
+        # Morphology: close to reconnect fragments, open to strip noise
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, h_close_kernel)
+        processed = cv2.morphologyEx(closed, cv2.MORPH_OPEN, noise_kernel)
+
+        # Method A: contour bounding boxes (wide & flat = horizontal segment)
         contours, _ = cv2.findContours(
-            dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         for cnt in contours:
             x, y, cw, ch = cv2.boundingRect(cnt)
+            contour_raw += 1
             if cw >= min_line_width and ch <= max_line_height:
                 center_y = y + ch // 2
-                results.append((center_y, color_label))
+                results.append((center_y + roi_top, color_label))
 
-    return _deduplicate_lines(results)
+        # Method B: probabilistic Hough lines (near-horizontal)
+        hough_result = cv2.HoughLinesP(
+            processed,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=hough_threshold,
+            minLineLength=min_line_width,
+            maxLineGap=hough_gap,
+        )
+        if hough_result is not None:
+            for seg in hough_result:
+                x1, y1, x2, y2 = int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3])
+                dx = abs(x2 - x1)
+                dy = abs(y2 - y1)
+                length = float(np.sqrt(dx * dx + dy * dy))
+                hough_raw += 1
+                if length > 0 and dy / length <= hough_angle_sin:
+                    center_y = (y1 + y2) // 2
+                    results.append((center_y + roi_top, color_label))
+
+    if debug_out is not None:
+        debug_out["contour_segments_raw"] = contour_raw
+        debug_out["hough_segments_raw"] = hough_raw
+        debug_out["segments_before_dedup"] = len(results)
+
+    deduped = _deduplicate_lines(results)
+
+    if debug_out is not None:
+        debug_out["segments_after_dedup"] = len(deduped)
+
+    return deduped
 
 
 def _parse_price_axis(img: "np.ndarray") -> List[Tuple[int, float]]:
@@ -503,6 +645,7 @@ def extract_from_image(
     date_et: Optional[str] = None,
     timeframe: str = "30m",
     lookback_days: int = 5,
+    debug: bool = False,
 ) -> ExtractionResult:
     """
     Extract price levels from a chart screenshot.
@@ -515,6 +658,10 @@ def extract_from_image(
         Ticker symbol (used only for logging).
     date_et, timeframe, lookback_days:
         Passed through for context logging; not used in extraction.
+    debug:
+        When ``True``, populate ``ExtractionResult.debug_info`` with
+        diagnostic counters (image size, chart ROI, mask pixel counts,
+        segment counts before and after filtering).
 
     Returns
     -------
@@ -538,11 +685,17 @@ def extract_from_image(
         logger.info("cv2.imdecode returned None for ticker=%s (invalid image)", ticker)
         return ExtractionResult()
 
+    # Collect debug telemetry when requested
+    _debug_info: Optional[dict] = None
+    if debug:
+        h_img, w_img = img.shape[:2]
+        _debug_info = {"image_size": {"width": w_img, "height": h_img}}
+
     # Step 1: Parse price axis ────────────────────────────────────────────────
     axis_points = _parse_price_axis(img)
 
     # Step 2: Detect horizontal lines ─────────────────────────────────────────
-    lines = _detect_horizontal_lines(img)
+    lines = _detect_horizontal_lines(img, debug_out=_debug_info)
 
     # Step 3: Map line y-positions to prices ──────────────────────────────────
     line_prices: List[float] = []
@@ -594,4 +747,5 @@ def extract_from_image(
         num_axis_points=len(axis_points),
         extraction_confidence=confidence,
         warning=warning,
+        debug_info=_debug_info,
     )

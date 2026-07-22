@@ -266,10 +266,11 @@ class TestDetectHorizontalLines:
         assert lines == []
 
     def test_short_segment_not_detected(self):
-        """A segment shorter than 10 % of image width should not be detected."""
+        """A segment shorter than 3 % of chart width should not be detected."""
         img = self._blank()
-        # Only 5 % of width → below _LINE_MIN_WIDTH_FRACTION
-        img[200, 0:40] = [129, 153, 8]  # 40 / 800 = 5 %
+        # ~1.5 % of 800 px image width → below the 3 % _LINE_MIN_WIDTH_FRACTION.
+        # chart_w ≈ 680 (after excluding 15 % price-axis); min_line_width = 20 px.
+        img[200, 0:12] = [129, 153, 8]  # 12 px < 20 px minimum
         lines = _detect_horizontal_lines(img)
         assert lines == []
 
@@ -331,3 +332,161 @@ class TestExtractFromImage:
         result = extract_from_image(bytes(buf))
         assert result.image_decoded is True
         assert result.num_lines_detected >= 1
+
+    def test_debug_false_produces_no_debug_info(self):
+        """When debug=False (default), debug_info must be None."""
+        img = np.zeros((400, 800, 3), dtype=np.uint8)
+        img[200, 80:700] = [129, 153, 8]
+        import cv2
+
+        ok, buf = cv2.imencode(".png", img)
+        assert ok
+        result = extract_from_image(bytes(buf), debug=False)
+        assert result.debug_info is None
+
+    def test_debug_true_populates_debug_info(self):
+        """When debug=True, debug_info must contain the required keys."""
+        img = np.zeros((400, 800, 3), dtype=np.uint8)
+        img[200, 80:700] = [129, 153, 8]
+        import cv2
+
+        ok, buf = cv2.imencode(".png", img)
+        assert ok
+        result = extract_from_image(bytes(buf), debug=True)
+        assert result.debug_info is not None
+        di = result.debug_info
+        assert "image_size" in di
+        assert di["image_size"]["width"] == 800
+        assert di["image_size"]["height"] == 400
+        assert "chart_roi" in di
+        assert "green_mask_pixels" in di
+        assert "red_mask_pixels" in di
+        assert "segments_before_dedup" in di
+        assert "segments_after_dedup" in di
+
+
+# ---------------------------------------------------------------------------
+# Anti-aliased line detection
+# ---------------------------------------------------------------------------
+
+
+class TestAntiAliasedDetection:
+    """Verify that lines blended with a dark background are still detected."""
+
+    _BG = [34, 23, 19]   # TradingView dark theme background ≈ #131722
+    _GREEN = [129, 153, 8]
+    _RED = [69, 54, 242]
+
+    @staticmethod
+    def _blend(color, bg, alpha: float) -> list:
+        return [int(alpha * c + (1 - alpha) * b) for c, b in zip(color, bg)]
+
+    @staticmethod
+    def _blank(h: int = 400, w: int = 800) -> np.ndarray:
+        return np.zeros((h, w, 3), dtype=np.uint8)
+
+    def test_detects_80pct_antialiased_green(self):
+        """80 % blend of TradingView green with dark bg must be detected."""
+        img = self._blank()
+        blended = self._blend(self._GREEN, self._BG, 0.8)
+        img[200, 80:700] = blended
+        lines = _detect_horizontal_lines(img)
+        assert len(lines) > 0, f"Expected line but got none (color={blended})"
+        assert any(abs(y - 200) <= 5 for y, _ in lines)
+
+    def test_detects_80pct_antialiased_red(self):
+        """80 % blend of TradingView red with dark bg must be detected."""
+        img = self._blank()
+        blended = self._blend(self._RED, self._BG, 0.8)
+        img[150, 80:700] = blended
+        lines = _detect_horizontal_lines(img)
+        assert len(lines) > 0, f"Expected line but got none (color={blended})"
+        assert any(abs(y - 150) <= 5 for y, _ in lines)
+
+    def test_3pixel_antialiased_green_line_detected(self):
+        """A 3-row anti-aliased green line (core + 60 % blended rows) is detected."""
+        img = self._blank()
+        core_y = 200
+        img[core_y, 80:700] = self._GREEN
+        img[core_y - 1, 80:700] = self._blend(self._GREEN, self._BG, 0.6)
+        img[core_y + 1, 80:700] = self._blend(self._GREEN, self._BG, 0.6)
+        lines = _detect_horizontal_lines(img)
+        assert len(lines) > 0
+        assert any(abs(y - core_y) <= 5 for y, _ in lines)
+
+
+# ---------------------------------------------------------------------------
+# Chart ROI exclusion
+# ---------------------------------------------------------------------------
+
+
+class TestChartROI:
+    """Lines outside the chart plot area should not be detected."""
+
+    _GREEN = [129, 153, 8]
+
+    @staticmethod
+    def _blank(h: int = 400, w: int = 800) -> np.ndarray:
+        return np.zeros((h, w, 3), dtype=np.uint8)
+
+    def test_line_in_price_axis_not_detected(self):
+        """A line drawn entirely in the rightmost 15 % (price axis) is excluded."""
+        img = self._blank()
+        axis_start = int(800 * 0.85) + 5  # well inside axis strip
+        img[200, axis_start:795] = self._GREEN
+        lines = _detect_horizontal_lines(img)
+        assert lines == [], f"Expected no line from axis area, got {lines}"
+
+    def test_line_in_title_area_not_detected(self):
+        """A line drawn in the top 8 % (title/watermark) is excluded."""
+        img = self._blank()
+        title_y = int(400 * 0.04)  # 4 %, well inside top exclusion zone
+        img[title_y, 80:600] = self._GREEN
+        lines = _detect_horizontal_lines(img)
+        assert lines == [], f"Expected no line from title area, got {lines}"
+
+    def test_line_in_bottom_panel_not_detected(self):
+        """A line drawn below 90 % of image height (session/ATR panel) is excluded."""
+        img = self._blank()
+        bottom_y = int(400 * 0.95)  # 95 %, inside bottom exclusion zone
+        img[bottom_y, 80:600] = self._GREEN
+        lines = _detect_horizontal_lines(img)
+        assert lines == [], f"Expected no line from bottom panel, got {lines}"
+
+    def test_line_in_chart_area_detected(self):
+        """A line within the chart plot area is detected."""
+        img = self._blank()
+        chart_y = int(400 * 0.50)  # 50 %, centre of chart
+        img[chart_y, 80:600] = self._GREEN
+        lines = _detect_horizontal_lines(img)
+        assert len(lines) > 0
+
+
+# ---------------------------------------------------------------------------
+# Debug output from _detect_horizontal_lines
+# ---------------------------------------------------------------------------
+
+
+class TestDetectLinesDebugOut:
+    @staticmethod
+    def _green_image(h: int = 400, w: int = 800) -> np.ndarray:
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        img[200, 80:700] = [129, 153, 8]
+        return img
+
+    def test_debug_out_populated(self):
+        img = self._green_image()
+        debug: dict = {}
+        lines = _detect_horizontal_lines(img, debug_out=debug)
+        assert "chart_roi" in debug
+        assert "green_mask_pixels" in debug
+        assert "red_mask_pixels" in debug
+        assert "segments_before_dedup" in debug
+        assert "segments_after_dedup" in debug
+        assert debug["green_mask_pixels"] > 0
+
+    def test_debug_out_none_by_default(self):
+        """Calling without debug_out must not raise and must return lines."""
+        img = self._green_image()
+        lines = _detect_horizontal_lines(img)
+        assert len(lines) > 0

@@ -321,3 +321,75 @@ def test_analyze_image_e2e_no_levels_no_analysis(monkeypatch):
     data = resp.json()
     assert "analysis" not in data  # excluded because it's None
     assert "extraction_warning" in data
+
+
+def test_analyze_image_debug_query_param_returns_debug_info(monkeypatch):
+    """
+    When debug=true is passed as a query param, the response must include
+    debug_info populated by the extractor.
+    """
+    import packages.core.image_extractor as img_ext
+    import apps.api.routes.analyze as analyze_route
+
+    mock_result = img_ext.ExtractionResult(
+        image_decoded=True,
+        levels_payload=None,
+        current_price=None,
+        num_lines_detected=2,
+        num_axis_points=0,
+        extraction_confidence=0.25,
+        warning="Low confidence extraction: extraction confidence is low.",
+        debug_info={
+            "image_size": {"width": 800, "height": 600},
+            "chart_roi": {"top": 48, "bottom": 540, "left": 0, "right": 680},
+            "green_mask_pixels": 1200,
+            "red_mask_pixels": 800,
+            "contour_segments_raw": 4,
+            "hough_segments_raw": 3,
+            "segments_before_dedup": 4,
+            "segments_after_dedup": 2,
+        },
+    )
+
+    monkeypatch.setattr(analyze_route, "extract_from_image", lambda *a, **kw: mock_result)
+
+    resp = client.post(
+        "/analyze-image?debug=true",
+        files={"file": ("chart.png", b"\x89PNG\r\n\x1a\nfakepng", "image/png")},
+        data={"ticker": "NQ"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "debug_info" in data
+    di = data["debug_info"]
+    assert di["image_size"] == {"width": 800, "height": 600}
+    assert di["green_mask_pixels"] == 1200
+    assert di["segments_after_dedup"] == 2
+
+
+def test_analyze_image_no_debug_param_excludes_debug_info(monkeypatch):
+    """
+    Without debug=true, debug_info must be absent from the response even if
+    the extractor returned it.
+    """
+    import packages.core.image_extractor as img_ext
+    import apps.api.routes.analyze as analyze_route
+
+    mock_result = img_ext.ExtractionResult(
+        image_decoded=True,
+        num_lines_detected=0,
+        extraction_confidence=0.0,
+        warning="Low confidence extraction: extraction confidence is low.",
+        debug_info={"image_size": {"width": 800, "height": 600}},
+    )
+
+    monkeypatch.setattr(analyze_route, "extract_from_image", lambda *a, **kw: mock_result)
+
+    resp = client.post(
+        "/analyze-image",
+        files={"file": ("chart.png", b"\x89PNG\r\n\x1a\nfakepng", "image/png")},
+        data={"ticker": "NQ"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "debug_info" not in data

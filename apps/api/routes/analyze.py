@@ -5,7 +5,7 @@ import logging
 import uuid
 from enum import Enum
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from packages.core.image_extractor import ExtractionResult, extract_from_image
@@ -98,6 +98,7 @@ class AnalyzeImageResponse(BaseModel):
     extraction_confidence: float | None = None
     extraction_warning: str | None = None
     analysis: AnalyzeResponse | None = None
+    debug_info: dict | None = None
 
 
 def _confidence_to_float(tag: ConvictionTag) -> float:
@@ -143,6 +144,7 @@ async def analyze_image(
     timeframe: str | None = Form(default=None),
     lookback_days: int | None = Form(default=None),
     date_et: str | None = Form(default=None),
+    debug: bool = Query(default=False),
 ) -> AnalyzeImageResponse:
     content_type = file.content_type or ""
     if content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
@@ -160,6 +162,7 @@ async def analyze_image(
         date_et=date_et,
         timeframe=timeframe or "30m",
         lookback_days=lookback_days or 5,
+        debug=debug,
     )
 
     # When the image could not be decoded at all, return the minimal response
@@ -215,6 +218,7 @@ async def analyze_image(
         extraction_confidence=extraction.extraction_confidence,
         extraction_warning=extraction.warning,
         analysis=analysis,
+        debug_info=extraction.debug_info if debug else None,
     )
 
 
