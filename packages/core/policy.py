@@ -56,7 +56,7 @@ class PolicyDecision:
     confidence_threshold: float
     nearby_structure_threshold: float | None
     stand_down_reasons: list[str]
-    rr: float
+    rr_target: float
     daily_profit_cap_usd: float
     lockout_reset_timezone: str
     lockout_reset_time: str
@@ -76,13 +76,13 @@ def _policy_path() -> Path:
 
 
 def _resolve_symbol_key(ticker: str, symbol_map: dict[str, Any]) -> str:
-    t = (ticker or "").upper()
-    if not t:
+    ticker_upper = (ticker or "").upper()
+    if not ticker_upper:
         return "UNKNOWN"
-    matches = sorted((k for k in symbol_map.keys() if t.startswith(k)), key=len, reverse=True)
+    matches = sorted((k for k in symbol_map.keys() if ticker_upper.startswith(k)), key=len, reverse=True)
     if matches:
         return matches[0]
-    return t
+    return ticker_upper
 
 
 @lru_cache(maxsize=1)
@@ -101,6 +101,12 @@ def load_policy_config() -> PolicyConfig:
             dollars_per_tick=float(model["dollars_per_tick"]),
         )
 
+    template_unit = str(fixed.get("unit", "ticks")).lower()
+    if template_unit not in {"ticks", "points"}:
+        raise ValueError(
+            f"fixed_350_template.unit must be either 'ticks' or 'points', got '{template_unit}'"
+        )
+
     return PolicyConfig(
         daily_profit_cap_usd=float(raw["daily_profit_cap_usd"]),
         lockout_reset_timezone=str(raw["lockout_reset_timezone"]),
@@ -114,13 +120,13 @@ def load_policy_config() -> PolicyConfig:
             str(k).upper(): int(v) for k, v in (prox.get("max_ticks_by_symbol", {}) or {}).items()
         },
         template_value=int(fixed.get("value", 350)),
-        template_unit=str(fixed.get("unit", "ticks")),
+        template_unit=template_unit,
         symbol_tick_model=symbol_models,
     )
 
 
-def _build_template_view(config: PolicyConfig, ticker: str) -> PolicyTemplateView:
-    symbol = _resolve_symbol_key(ticker=ticker, symbol_map=config.symbol_tick_model)
+def _compute_template_view(config: PolicyConfig, contract_ticker: str) -> PolicyTemplateView:
+    symbol = _resolve_symbol_key(ticker=contract_ticker, symbol_map=config.symbol_tick_model)
     model = config.symbol_tick_model.get(symbol)
     if model is None:
         return PolicyTemplateView(
@@ -141,6 +147,7 @@ def _build_template_view(config: PolicyConfig, ticker: str) -> PolicyTemplateVie
     )
     template_price_distance = round(template_ticks * model.tick_size, 6)
     estimated_risk_usd = round(template_ticks * model.dollars_per_tick, 2)
+    estimated_reward_usd = round(estimated_risk_usd * config.default_rr, 2)
     return PolicyTemplateView(
         symbol=symbol,
         value=config.template_value,
@@ -151,17 +158,22 @@ def _build_template_view(config: PolicyConfig, ticker: str) -> PolicyTemplateVie
         template_ticks=template_ticks,
         template_price_distance=template_price_distance,
         estimated_risk_usd=estimated_risk_usd,
-        estimated_reward_usd=estimated_risk_usd,
+        estimated_reward_usd=estimated_reward_usd,
     )
 
 
-def _nearby_structure_threshold(config: PolicyConfig, ticker: str, atr14: float | None) -> float | None:
-    symbol = _resolve_symbol_key(ticker=ticker, symbol_map=config.proximity_max_ticks_by_symbol)
+def _nearby_structure_threshold(
+    config: PolicyConfig, contract_ticker: str, atr14: float | None
+) -> float | None:
+    symbol = _resolve_symbol_key(
+        ticker=contract_ticker, symbol_map=config.proximity_max_ticks_by_symbol
+    )
     max_ticks = config.proximity_max_ticks_by_symbol.get(symbol)
     tick_model = config.symbol_tick_model.get(symbol)
 
-    atr_threshold = (atr14 or 0.0) * config.proximity_atr_multiple if atr14 and atr14 > 0 else None
-    tick_threshold = (max_ticks * tick_model.tick_size) if (max_ticks is not None and tick_model is not None) else None
+    atr_threshold = atr14 * config.proximity_atr_multiple if atr14 and atr14 > 0 else None
+    has_tick_cap = max_ticks is not None and tick_model is not None
+    tick_threshold = (max_ticks * tick_model.tick_size) if has_tick_cap else None
 
     thresholds = [x for x in (atr_threshold, tick_threshold) if x is not None and x > 0]
     if not thresholds:
@@ -172,7 +184,7 @@ def _nearby_structure_threshold(config: PolicyConfig, ticker: str, atr14: float 
 def enforce_scalper_policy(
     result: AnalysisResult,
     current_price: float,
-    ticker: str,
+    contract_ticker: str,
     realized_pnl_usd: float | None = None,
     atr14: float | None = None,
 ) -> PolicyDecision:
@@ -195,21 +207,31 @@ def enforce_scalper_policy(
             f"Confidence {confidence_value:.2f} below minimum {config.min_confidence_for_action:.2f}."
         )
 
-    nearby_threshold = _nearby_structure_threshold(config=config, ticker=ticker, atr14=atr14)
+    nearby_threshold = _nearby_structure_threshold(
+        config=config, contract_ticker=contract_ticker, atr14=atr14
+    )
 
     if (
         config.allow_only_nearby_structure
         and result.action_state != ActionState.STAND_DOWN
         and nearby_threshold is not None
     ):
-        if result.action_state == ActionState.ACTIVE_LONG and result.strongest_support:
+        if (
+            result.action_state == ActionState.ACTIVE_LONG
+            and result.strongest_support
+            and len(result.strongest_support) > 0
+        ):
             dist = abs(result.strongest_support[0].price - current_price)
             if dist > nearby_threshold:
                 enforced = ActionState.STAND_DOWN
                 reasons.append(
                     f"Support edge unclear: nearest support distance {dist:.2f} exceeds nearby threshold {nearby_threshold:.2f}."
                 )
-        elif result.action_state == ActionState.ACTIVE_SHORT and result.strongest_resistance:
+        elif (
+            result.action_state == ActionState.ACTIVE_SHORT
+            and result.strongest_resistance
+            and len(result.strongest_resistance) > 0
+        ):
             dist = abs(result.strongest_resistance[0].price - current_price)
             if dist > nearby_threshold:
                 enforced = ActionState.STAND_DOWN
@@ -220,7 +242,7 @@ def enforce_scalper_policy(
     if enforced == ActionState.STAND_DOWN and not reasons:
         reasons.append("Edge/structure unclear under strict scalper policy.")
 
-    template = _build_template_view(config=config, ticker=ticker)
+    template = _compute_template_view(config=config, contract_ticker=contract_ticker)
     return PolicyDecision(
         original_action_state=result.action_state,
         enforced_action_state=enforced,
@@ -229,7 +251,7 @@ def enforce_scalper_policy(
         confidence_threshold=config.min_confidence_for_action,
         nearby_structure_threshold=nearby_threshold,
         stand_down_reasons=reasons,
-        rr=config.default_rr,
+        rr_target=config.default_rr,
         daily_profit_cap_usd=config.daily_profit_cap_usd,
         lockout_reset_timezone=config.lockout_reset_timezone,
         lockout_reset_time=config.lockout_reset_time,

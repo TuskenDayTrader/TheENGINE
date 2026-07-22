@@ -1,5 +1,5 @@
 daily_profit_cap_usd: 550
-lockout_reset_timezone: America/New_York
+lockout_reset_timezone: "America/New_York"
 lockout_reset_time: "00:00"
 default_rr: 1.0
 min_confidence_for_action: 0.70

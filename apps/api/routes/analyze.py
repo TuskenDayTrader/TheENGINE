@@ -9,7 +9,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from packages.core.image_extractor import ExtractionResult, extract_from_image
-from packages.core.models import AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
+from packages.core.models import ActionState, AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
 from packages.core.output import build_poster
 from packages.core.policy import PolicyDecision, enforce_scalper_policy
 from packages.core.scoring import score
@@ -126,37 +126,17 @@ def _map_level(level: LevelDecision, current_price: float, atr_14: float | None)
     )
 
 
-def _map_response(result: AnalysisResult, current_price: float, atr_14: float | None) -> AnalyzeResponse:
-    policy = getattr(result, "_policy_decision", None)
-    policy_payload = {
-        "original_action_state": policy.original_action_state.value if policy else result.action_state.value,
-        "enforced_action_state": policy.enforced_action_state.value if policy else result.action_state.value,
-        "lockout_active": policy.lockout_active if policy else False,
-        "daily_profit_cap_usd": policy.daily_profit_cap_usd if policy else None,
-        "lockout_reset_timezone": policy.lockout_reset_timezone if policy else None,
-        "lockout_reset_time": policy.lockout_reset_time if policy else None,
-        "rr_target": policy.rr if policy else None,
-        "confidence_value": policy.confidence_value if policy else _confidence_to_float(result.confidence),
-        "min_confidence_for_action": policy.confidence_threshold if policy else None,
-        "nearby_structure_threshold": policy.nearby_structure_threshold if policy else None,
-        "stand_down_reasons": policy.stand_down_reasons if policy else [],
-        "template_350": (
-            {
-                "symbol": policy.template.symbol,
-                "value": policy.template.value,
-                "unit": policy.template.unit,
-                "tick_size": policy.template.tick_size,
-                "ticks_per_point": policy.template.ticks_per_point,
-                "dollars_per_tick": policy.template.dollars_per_tick,
-                "template_ticks": policy.template.template_ticks,
-                "template_price_distance": policy.template.template_price_distance,
-                "estimated_risk_usd": policy.template.estimated_risk_usd,
-                "estimated_reward_usd": policy.template.estimated_reward_usd,
-            }
-            if policy
-            else None
-        ),
-    }
+def _map_response(
+    result: AnalysisResult,
+    current_price: float,
+    atr_14: float | None,
+    policy: PolicyDecision | None = None,
+) -> AnalyzeResponse:
+    policy_payload = _policy_to_payload(
+        policy=policy,
+        fallback_state=result.action_state,
+        fallback_confidence=result.confidence,
+    )
     return AnalyzeResponse(
         ticker=result.ticker,
         date_et=result.date_et,
@@ -169,6 +149,62 @@ def _map_response(result: AnalysisResult, current_price: float, atr_14: float | 
         poster_text=build_poster(result),
         policy=policy_payload,
     )
+
+
+def _mutate_result_with_policy(
+    result: AnalysisResult, policy_reasons: list[str], enforced_state: ActionState
+) -> None:
+    """Mutate the scoring result in-place so poster output reflects policy enforcement."""
+    result.action_state = enforced_state
+    if policy_reasons and "Policy:" not in result.rationale:
+        result.rationale = f"{result.rationale} Policy: {' '.join(policy_reasons)}"
+
+
+def _policy_to_payload(
+    policy: PolicyDecision | None,
+    fallback_state: ActionState,
+    fallback_confidence: ConvictionTag,
+) -> dict:
+    if policy is None:
+        return {
+            "original_action_state": fallback_state.value,
+            "enforced_action_state": fallback_state.value,
+            "lockout_active": False,
+            "daily_profit_cap_usd": None,
+            "lockout_reset_timezone": None,
+            "lockout_reset_time": None,
+            "rr_target": None,
+            "confidence_value": _confidence_to_float(fallback_confidence),
+            "min_confidence_for_action": None,
+            "nearby_structure_threshold": None,
+            "stand_down_reasons": [],
+            "template_350": None,
+        }
+    return {
+        "original_action_state": policy.original_action_state.value,
+        "enforced_action_state": policy.enforced_action_state.value,
+        "lockout_active": policy.lockout_active,
+        "daily_profit_cap_usd": policy.daily_profit_cap_usd,
+        "lockout_reset_timezone": policy.lockout_reset_timezone,
+        "lockout_reset_time": policy.lockout_reset_time,
+        "rr_target": policy.rr_target,
+        "confidence_value": policy.confidence_value,
+        "min_confidence_for_action": policy.confidence_threshold,
+        "nearby_structure_threshold": policy.nearby_structure_threshold,
+        "stand_down_reasons": policy.stand_down_reasons,
+        "template_350": {
+            "symbol": policy.template.symbol,
+            "value": policy.template.value,
+            "unit": policy.template.unit,
+            "tick_size": policy.template.tick_size,
+            "ticks_per_point": policy.template.ticks_per_point,
+            "dollars_per_tick": policy.template.dollars_per_tick,
+            "template_ticks": policy.template.template_ticks,
+            "template_price_distance": policy.template.template_price_distance,
+            "estimated_risk_usd": policy.template.estimated_risk_usd,
+            "estimated_reward_usd": policy.template.estimated_reward_usd,
+        },
+    }
 
 
 @router.post("/analyze-image", response_model=AnalyzeImageResponse, response_model_exclude_none=True)
@@ -234,20 +270,20 @@ async def analyze_image(
             policy_decision = enforce_scalper_policy(
                 result=scored,
                 current_price=extraction.current_price,
-                ticker=ticker or "UNKNOWN",
+                contract_ticker=ticker or "UNKNOWN",
                 realized_pnl_usd=realized_pnl_usd,
                 atr14=extraction.levels_payload.atr14,
             )
-            scored.action_state = policy_decision.enforced_action_state
-            if policy_decision.stand_down_reasons:
-                scored.rationale = (
-                    f"{scored.rationale} Policy: {' '.join(policy_decision.stand_down_reasons)}"
-                )
-            setattr(scored, "_policy_decision", policy_decision)
+            _mutate_result_with_policy(
+                result=scored,
+                policy_reasons=policy_decision.stand_down_reasons,
+                enforced_state=policy_decision.enforced_action_state,
+            )
             analysis = _map_response(
                 scored,
                 extraction.current_price,
                 extraction.levels_payload.atr14,
+                policy_decision,
             )
         except Exception:
             error_id = uuid.uuid4().hex[:8]
@@ -286,14 +322,15 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         policy_decision = enforce_scalper_policy(
             result=result,
             current_price=payload.current_price,
-            ticker=payload.ticker,
+            contract_ticker=payload.ticker,
             realized_pnl_usd=payload.realized_pnl_usd,
             atr14=payload.levels.atr14,
         )
-        result.action_state = policy_decision.enforced_action_state
-        if policy_decision.stand_down_reasons:
-            result.rationale = f"{result.rationale} Policy: {' '.join(policy_decision.stand_down_reasons)}"
-        setattr(result, "_policy_decision", policy_decision)
+        _mutate_result_with_policy(
+            result=result,
+            policy_reasons=policy_decision.stand_down_reasons,
+            enforced_state=policy_decision.enforced_action_state,
+        )
     except Exception:
         error_id = uuid.uuid4().hex[:8]
         logger.exception(
@@ -306,4 +343,4 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             status_code=500,
             detail=f"An internal error occurred during analysis. Please try again. Ref: {error_id}",
         )
-    return _map_response(result, payload.current_price, payload.levels.atr14)
+    return _map_response(result, payload.current_price, payload.levels.atr14, policy_decision)
