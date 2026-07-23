@@ -14,18 +14,24 @@ DEFAULT_THEME = {
     "primary_bright": "#ff0000",
     "accent": "#ff6b6b",
 }
-_THEME_FILE = pathlib.Path(__file__).resolve().parents[2] / "config" / "ui_theme.yaml"
+_DEFAULT_THEME_FILE = pathlib.Path(__file__).resolve().parents[2] / "config" / "ui_theme.yaml"
 _THEME_LINE_PATTERN = re.compile(r'^\s{2}([a-z_]+):\s*["\']?(#[0-9a-fA-F]{6})["\']?\s*$')
 
 
-def _load_theme_from_file() -> dict[str, str]:
+def _theme_file_for(theme_name: str) -> pathlib.Path:
+    if theme_name == DEFAULT_THEME_NAME:
+        return _DEFAULT_THEME_FILE
+    return _DEFAULT_THEME_FILE.with_name(f"ui_theme.{theme_name}.yaml")
+
+
+def _load_theme_from_file(theme_file: pathlib.Path) -> dict[str, str]:
     theme = DEFAULT_THEME.copy()
 
-    if not _THEME_FILE.exists():
+    if not theme_file.exists():
         return theme
 
     in_theme_block = False
-    for raw_line in _THEME_FILE.read_text(encoding="utf-8").splitlines():
+    for raw_line in theme_file.read_text(encoding="utf-8").splitlines():
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -48,6 +54,8 @@ def _load_theme_from_file() -> dict[str, str]:
 
 def get_theme() -> dict[str, str]:
     requested_theme = os.getenv("UI_THEME", DEFAULT_THEME_NAME).strip() or DEFAULT_THEME_NAME
-    if requested_theme != DEFAULT_THEME_NAME:
+    theme_file = _theme_file_for(requested_theme)
+    if requested_theme != DEFAULT_THEME_NAME and not theme_file.exists():
         logger.warning("Unsupported UI_THEME '%s'; falling back to %s", requested_theme, DEFAULT_THEME_NAME)
-    return _load_theme_from_file()
+        theme_file = _theme_file_for(DEFAULT_THEME_NAME)
+    return _load_theme_from_file(theme_file)

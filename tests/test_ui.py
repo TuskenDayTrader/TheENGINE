@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from packages.core import ui_theme
 
 client = TestClient(app)
 
@@ -58,9 +59,27 @@ def test_theme_api_returns_hombre_palette():
 
 
 def test_theme_api_accepts_hombre_env_override(monkeypatch):
-    monkeypatch.setenv("UI_THEME", "hombre_red")
+    default_file = ui_theme._DEFAULT_THEME_FILE
+    alternate_file = default_file.with_name("ui_theme.nightfall.yaml")
+    alternate_file.write_text(
+        'theme:\n'
+        '  primary_dark: "#111111"\n'
+        '  primary_mid: "#550000"\n'
+        '  primary_bright: "#ff3333"\n'
+        '  accent: "#ffaa55"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UI_THEME", "nightfall")
 
-    resp = client.get("/api/theme")
+    try:
+        resp = client.get("/api/theme")
 
-    assert resp.status_code == 200
-    assert resp.json()["primary_mid"] == "#8b0000"
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "primary_dark": "#111111",
+            "primary_mid": "#550000",
+            "primary_bright": "#ff3333",
+            "accent": "#ffaa55",
+        }
+    finally:
+        alternate_file.unlink(missing_ok=True)

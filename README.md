@@ -20,6 +20,8 @@ Optional environment override:
 UI_THEME=hombre_red python -m uvicorn apps.api.main:app --reload --port 8000
 ```
 
+The repo currently ships one built-in profile (`hombre_red`) in `config/ui_theme.yaml`. If you add more profiles later, name them `config/ui_theme.<name>.yaml` and select them with `UI_THEME=<name>`.
+
 Read the current palette from the API:
 
 ```bash
