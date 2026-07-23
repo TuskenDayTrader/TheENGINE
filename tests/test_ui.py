@@ -58,8 +58,8 @@ def test_theme_api_returns_hombre_palette():
     }
 
 
-def test_theme_api_accepts_hombre_env_override(monkeypatch):
-    default_file = ui_theme._DEFAULT_THEME_FILE
+def test_theme_api_accepts_alternate_theme_via_env(monkeypatch):
+    default_file = ui_theme.DEFAULT_THEME_FILE
     alternate_file = default_file.with_name("ui_theme.nightfall.yaml")
     alternate_file.write_text(
         'theme:\n'
@@ -69,13 +69,16 @@ def test_theme_api_accepts_hombre_env_override(monkeypatch):
         '  accent: "#ffaa55"\n',
         encoding="utf-8",
     )
-    monkeypatch.setenv("UI_THEME", "nightfall")
 
     try:
-        resp = client.get("/api/theme")
+        default_resp = client.get("/api/theme")
+        monkeypatch.setenv("UI_THEME", "nightfall")
+        override_resp = client.get("/api/theme")
 
-        assert resp.status_code == 200
-        assert resp.json() == {
+        assert default_resp.status_code == 200
+        assert default_resp.json()["primary_dark"] == "#0a0a0a"
+        assert override_resp.status_code == 200
+        assert override_resp.json() == {
             "primary_dark": "#111111",
             "primary_mid": "#550000",
             "primary_bright": "#ff3333",

@@ -14,14 +14,14 @@ DEFAULT_THEME = {
     "primary_bright": "#ff0000",
     "accent": "#ff6b6b",
 }
-_DEFAULT_THEME_FILE = pathlib.Path(__file__).resolve().parents[2] / "config" / "ui_theme.yaml"
-_THEME_LINE_PATTERN = re.compile(r'^\s{2}([a-z_]+):\s*["\']?(#[0-9a-fA-F]{6})["\']?\s*$')
+DEFAULT_THEME_FILE = pathlib.Path(__file__).resolve().parents[2] / "config" / "ui_theme.yaml"
+_THEME_LINE_PATTERN = re.compile(r'^\s+([a-z_]+):\s*["\']?(#[0-9a-fA-F]{6})["\']?\s*$')
 
 
 def _theme_file_for(theme_name: str) -> pathlib.Path:
     if theme_name == DEFAULT_THEME_NAME:
-        return _DEFAULT_THEME_FILE
-    return _DEFAULT_THEME_FILE.with_name(f"ui_theme.{theme_name}.yaml")
+        return DEFAULT_THEME_FILE
+    return DEFAULT_THEME_FILE.with_name(f"ui_theme.{theme_name}.yaml")
 
 
 def _load_theme_from_file(theme_file: pathlib.Path) -> dict[str, str]:
