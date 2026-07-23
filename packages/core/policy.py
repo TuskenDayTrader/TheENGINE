@@ -144,15 +144,18 @@ def _proximity_limit(config: dict, symbol: str, atr14: Optional[float]) -> float
         mult = float(prox.get("atr_multiple", 1.0))
         return atr14 * mult
 
-    # Fallback: ticks → points
+    # Fallback: ticks → points (uses per-symbol tick_size from template config).
+    # When the symbol is unknown, ticks default to 160 and tick_size to 1.0
+    # (1 point per tick), giving a 160-point proximity limit as a safe default.
     max_ticks = prox.get("max_ticks_by_symbol", {})
     sym_key = (symbol or "").upper()
     ticks = max_ticks.get(sym_key, 160)
 
-    # Derive tick_size from template config
+    # Derive tick_size from template config; default 1.0 (= 1 pt per tick)
+    # when the symbol is not in the template table.
     tpl = config.get("fixed_distance_template", {}).get("values_by_symbol", {})
     entry = tpl.get(sym_key, {})
-    tick_size = float(entry.get("tick_size", 0.25))
+    tick_size = float(entry.get("tick_size", 1.0))
     return ticks * tick_size
 
 
@@ -320,7 +323,7 @@ def check_extraction_quality_gates(
     if floor is not None:
         bad = [p for p in levels if p < floor]
         if bad:
-            examples = ", ".join(f"{p:.4f}" for p in bad[:3])
+            examples = ", ".join(f"{p:.2f}" for p in bad[:3])
             return QualityGateResult(
                 passed=False,
                 rejection_reason=(
@@ -335,7 +338,7 @@ def check_extraction_quality_gates(
         hi = axis_max * 1.10
         out = [p for p in levels if p < lo or p > hi]
         if out:
-            examples = ", ".join(f"{p:.4f}" for p in out[:3])
+            examples = ", ".join(f"{p:.2f}" for p in out[:3])
             return QualityGateResult(
                 passed=False,
                 rejection_reason=(

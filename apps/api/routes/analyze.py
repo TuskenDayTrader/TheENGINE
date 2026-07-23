@@ -201,9 +201,10 @@ def _map_response(
     )
 
     # Policy reason: join stand-down reasons or describe active state
+    _ACTIVE_STATES = {"ACTIVE_LONG_1TO1", "ACTIVE_SHORT_1TO1"}
     if decision.stand_down_reasons:
         policy_reason = " ".join(decision.stand_down_reasons)
-    elif decision.enforced_action_state.startswith("ACTIVE"):
+    elif decision.enforced_action_state in _ACTIVE_STATES:
         dist = (
             decision.template_350.template_price_distance
             if decision.template_350

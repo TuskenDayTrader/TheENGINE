@@ -9,8 +9,6 @@ Covers:
 5. Quality gate passes → analysis block present
 6. API response includes policy block on successful analysis
 7. Edge cases: mixed levels, unknown ticker, empty levels
-
-19 tests covering all three gates and the API endpoint wiring.
 """
 from __future__ import annotations
 
