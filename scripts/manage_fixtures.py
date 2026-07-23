@@ -124,8 +124,8 @@ def _ticker_folder_size_bytes(fixtures_root: Path, ticker: str) -> int:
     return total
 
 
-def _archive_old_fixtures(fixtures_root: Path, manifest: dict, now_utc: dt.datetime | None = None) -> None:
-    now = now_utc or dt.datetime.now(dt.timezone.utc)
+def _archive_old_fixtures(fixtures_root: Path, manifest: dict, now: dt.datetime | None = None) -> None:
+    now = now or dt.datetime.now(dt.timezone.utc)
     archive_cutoff = now - dt.timedelta(days=ARCHIVE_AGE_DAYS)
     archived_root = fixtures_root / "archived"
 
