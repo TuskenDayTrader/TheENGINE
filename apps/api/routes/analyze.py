@@ -9,13 +9,14 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from packages.core.image_extractor import ExtractionResult, extract_from_image
-from packages.core.models import AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
+from packages.core.models import ActionState, AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
 from packages.core.output import build_poster
 from packages.core.scoring import score
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 ALLOWED_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+DAILY_PNL_CAP: float = 550.0  # USD — stop trading once realized P&L reaches this amount
 
 
 class Timeframe(str, Enum):
@@ -226,7 +227,6 @@ async def analyze_image(
 @router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     # --- Daily profit cap: $550 lockout -----------------------------------
-    DAILY_PNL_CAP = 550.0
     if payload.daily_pnl is not None and payload.daily_pnl >= DAILY_PNL_CAP:
         return AnalyzeResponse(
             ticker=payload.ticker,
@@ -235,7 +235,7 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             weakest_resistance=[],
             strongest_support=[],
             weakest_support=[],
-            action_state="STOP_TRADING_DAY",
+            action_state=ActionState.STOP_TRADING_DAY.value,
             confidence=1.0,
             poster_text=(
                 f"{payload.ticker} DAILY CAP REACHED\n"
