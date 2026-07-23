@@ -26,3 +26,23 @@ def test_template_reward_uses_rr_multiplier():
     template = _compute_template_view(config=config, contract_ticker="NQU2026")
     assert template.estimated_risk_usd == pytest.approx(1750.0)
     assert template.estimated_reward_usd == pytest.approx(template.estimated_risk_usd * 2.0)
+
+
+def test_policy_config_default_values():
+    """Verify that optional fields have the expected defaults when not provided."""
+    config = PolicyConfig(
+        daily_profit_cap_usd=550.0,
+        lockout_reset_timezone="America/New_York",
+        lockout_reset_time="00:00",
+        default_rr=1.0,
+        min_confidence_for_action=0.70,
+        allow_only_nearby_structure=True,
+        proximity_model_type="min_of_atr_and_ticks",
+        proximity_atr_multiple=0.25,
+        proximity_max_ticks_by_symbol={},
+        template_value=350,
+        template_unit="ticks",
+        symbol_tick_model={},
+    )
+    assert config.minimum_distinct_levels == 1
+    assert config.instrument_price_floor == {}

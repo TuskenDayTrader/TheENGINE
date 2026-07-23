@@ -893,7 +893,10 @@ def extract_from_image(
     kept_lines_debug: List[dict] = []
     for y, color in lines:
         raw_price = _map_y_to_price(y, axis_points)
-        mapped_price: Optional[float] = round(raw_price, 4) if raw_price is not None and raw_price > 0 else None
+        if raw_price is not None and raw_price > 0:
+            mapped_price: Optional[float] = round(raw_price, 4)
+        else:
+            mapped_price = None
         if mapped_price is not None:
             line_prices.append(mapped_price)
         if debug and _debug_info is not None:

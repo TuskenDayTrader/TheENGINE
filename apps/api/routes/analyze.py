@@ -171,8 +171,8 @@ def _mutate_result_with_policy(
 ) -> None:
     """Mutate the scoring result in-place so poster output reflects policy enforcement."""
     result.action_state = enforced_state
-    if policy_reasons and "Policy:" not in result.rationale:
-        result.rationale = f"{result.rationale} Policy: {' '.join(policy_reasons)}"
+    if policy_reasons and (not result.rationale or "Policy:" not in result.rationale):
+        result.rationale = f"{result.rationale or ''} Policy: {' '.join(policy_reasons)}"
 
 
 def _policy_to_payload(
