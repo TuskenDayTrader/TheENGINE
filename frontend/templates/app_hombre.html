@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TheENGINE Hombre Theme Starter</title>
+  <style>
+    :root {
+      --primary-dark: {{ theme.primary_dark | default('#0a0a0a') }};
+      --primary-mid: {{ theme.primary_mid | default('#8b0000') }};
+      --primary-bright: {{ theme.primary_bright | default('#ff0000') }};
+      --accent: {{ theme.accent | default('#ff6b6b') }};
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary-mid) 55%, var(--primary-bright) 100%);
+      color: #fff5f5;
+      display: grid;
+      place-items: center;
+      padding: 2rem;
+    }
+
+    .dashboard-shell {
+      width: min(1100px, 100%);
+      border: 1px solid rgba(255, 107, 107, 0.35);
+      border-radius: 20px;
+      background: rgba(10, 10, 10, 0.75);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      overflow: hidden;
+    }
+
+    .hero,
+    .content-slot {
+      padding: 1.5rem;
+    }
+
+    .hero {
+      border-bottom: 1px solid rgba(255, 107, 107, 0.25);
+    }
+
+    .accent-bar {
+      height: 4px;
+      width: 100%;
+      background: linear-gradient(90deg, var(--primary-dark), var(--accent), var(--primary-bright));
+    }
+
+    .slot-grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .slot {
+      min-height: 160px;
+      border-radius: 14px;
+      border: 1px dashed rgba(255, 107, 107, 0.4);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="dashboard-shell">
+    <div class="accent-bar"></div>
+    <section class="hero">
+      <h1>TheENGINE</h1>
+      <p>Hombre black → deep red → bright red starter shell for future dashboard polish.</p>
+    </section>
+    <section class="content-slot">
+      <div class="slot-grid">
+        <article class="slot">Chart / upload component slot</article>
+        <article class="slot">Analysis / action state slot</article>
+        <article class="slot">Fixture / history slot</article>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

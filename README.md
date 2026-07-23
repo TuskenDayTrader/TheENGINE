@@ -2,6 +2,35 @@
 
 A compilation of my work Tusken Day Trader.
 
+## UI theme hooks
+
+Bare-bones UI skinning is configured through `config/ui_theme.yaml`.
+
+```yaml
+theme:
+  primary_dark: "#0a0a0a"
+  primary_mid: "#8b0000"
+  primary_bright: "#ff0000"
+  accent: "#ff6b6b"
+```
+
+Optional environment override:
+
+```bash
+# Explicitly keep using the default built-in palette
+UI_THEME=hombre_red python -m uvicorn apps.api.main:app --reload --port 8000
+```
+
+The repo currently ships one built-in profile (`hombre_red`) in `config/ui_theme.yaml`. If you add more profiles later, name them `config/ui_theme.<name>.yaml` and select them with `UI_THEME=<name>`.
+
+Read the current palette from the API:
+
+```bash
+curl http://127.0.0.1:8000/api/theme
+```
+
+To customize the UI later, edit `config/ui_theme.yaml` and `frontend/templates/app_hombre.html`.
+
 ## Fixture screenshot organization
 
 Screenshot fixtures are organized by ticker and timestamp under `tests/fixtures/screenshots/`:
