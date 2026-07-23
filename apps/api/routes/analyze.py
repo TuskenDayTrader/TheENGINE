@@ -4,6 +4,7 @@ import datetime as dt
 import logging
 import uuid
 from enum import Enum
+from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -11,6 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from packages.core.image_extractor import ExtractionResult, extract_from_image
 from packages.core.models import AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
 from packages.core.output import build_poster
+from packages.core.policy import (
+    PolicyDecision,
+    QualityGateResult,
+    Template350,
+    check_extraction_quality_gates,
+    enforce_scalper_policy,
+)
 from packages.core.scoring import score
 
 logger = logging.getLogger(__name__)
@@ -62,6 +70,7 @@ class AnalyzeRequest(BaseModel):
     lookback_days: int = Field(ge=1)
     current_price: float = Field(gt=0)
     levels: LevelsInput
+    realized_pnl_today: float = Field(default=0.0)
 
     @field_validator("date_et")
     @classmethod
@@ -78,6 +87,22 @@ class ResponseLevel(BaseModel):
     rationale: str
 
 
+class PolicyTemplate350Response(BaseModel):
+    symbol: str
+    template_price_distance: float
+    estimated_risk_usd: float
+
+
+class PolicyResponse(BaseModel):
+    """Scalper policy decision appended to every analysis response."""
+
+    enforced_action_state: str
+    lockout_active: bool
+    stand_down_reasons: List[str]
+    rr_target: float
+    template_350: Optional[PolicyTemplate350Response] = None
+
+
 class AnalyzeResponse(BaseModel):
     ticker: str
     date_et: str
@@ -88,6 +113,12 @@ class AnalyzeResponse(BaseModel):
     action_state: str
     confidence: float
     poster_text: str
+    nearest_resistance: float | None = None
+    nearest_support: float | None = None
+    policy_reason: str | None = None
+    stop_distance: float | None = None
+    target_distance: float | None = None
+    policy: PolicyResponse | None = None
 
 
 class AnalyzeImageResponse(BaseModel):
@@ -123,7 +154,73 @@ def _map_level(level: LevelDecision, current_price: float, atr_14: float | None)
     )
 
 
-def _map_response(result: AnalysisResult, current_price: float, atr_14: float | None) -> AnalyzeResponse:
+def _policy_response(decision: PolicyDecision) -> PolicyResponse:
+    tpl = None
+    if decision.template_350:
+        tpl = PolicyTemplate350Response(
+            symbol=decision.template_350.symbol,
+            template_price_distance=decision.template_350.template_price_distance,
+            estimated_risk_usd=decision.template_350.estimated_risk_usd,
+        )
+    return PolicyResponse(
+        enforced_action_state=decision.enforced_action_state,
+        lockout_active=decision.lockout_active,
+        stand_down_reasons=decision.stand_down_reasons,
+        rr_target=decision.rr_target,
+        template_350=tpl,
+    )
+
+
+def _map_response(
+    result: AnalysisResult,
+    current_price: float,
+    atr_14: float | None,
+    ticker: str = "UNKNOWN",
+    realized_pnl_today: float = 0.0,
+) -> AnalyzeResponse:
+    confidence_float = _confidence_to_float(result.confidence)
+
+    # Nearest levels (closest to current price on each side)
+    nearest_res: float | None = None
+    nearest_sup: float | None = None
+    if result.strongest_resistance:
+        nearest_res = result.strongest_resistance[0].price
+    if result.strongest_support:
+        nearest_sup = result.strongest_support[0].price
+
+    # Apply policy engine
+    decision = enforce_scalper_policy(
+        ticker=ticker,
+        action_state=result.action_state.value,
+        confidence=confidence_float,
+        nearest_resistance=nearest_res,
+        nearest_support=nearest_sup,
+        current_price=current_price,
+        atr14=atr_14,
+        realized_pnl_today=realized_pnl_today,
+    )
+
+    # Policy reason: join stand-down reasons or describe active state
+    if decision.stand_down_reasons:
+        policy_reason = " ".join(decision.stand_down_reasons)
+    elif decision.enforced_action_state.startswith("ACTIVE"):
+        dist = (
+            decision.template_350.template_price_distance
+            if decision.template_350
+            else "N/A"
+        )
+        policy_reason = (
+            f"1:1 RR template applied. Stop and target distance: {dist} pts."
+        )
+    else:
+        policy_reason = "Stand down — insufficient edge."
+
+    stop_distance = None
+    target_distance = None
+    if decision.template_350:
+        stop_distance = decision.template_350.template_price_distance
+        target_distance = decision.template_350.template_price_distance
+
     return AnalyzeResponse(
         ticker=result.ticker,
         date_et=result.date_et,
@@ -132,8 +229,14 @@ def _map_response(result: AnalysisResult, current_price: float, atr_14: float | 
         strongest_support=[_map_level(x, current_price, atr_14) for x in result.strongest_support],
         weakest_support=[_map_level(x, current_price, atr_14) for x in result.weakest_support],
         action_state=result.action_state.value,
-        confidence=_confidence_to_float(result.confidence),
+        confidence=confidence_float,
         poster_text=build_poster(result),
+        nearest_resistance=nearest_res,
+        nearest_support=nearest_sup,
+        policy_reason=policy_reason,
+        stop_distance=stop_distance,
+        target_distance=target_distance,
+        policy=_policy_response(decision),
     )
 
 
@@ -179,6 +282,34 @@ async def analyze_image(
     # Run the scoring pipeline when extraction produced usable data
     analysis: AnalyzeResponse | None = None
     if extraction.levels_payload is not None and extraction.current_price is not None:
+        # Extraction quality gates: validate levels before scoring
+        lp = extraction.levels_payload
+        all_level_prices = []
+        for attr in (
+            "pdh", "pdl", "globex_high", "globex_low",
+            "asia_high", "asia_low", "london_high", "london_low",
+            "ny_high", "ny_low",
+        ):
+            val = getattr(lp, attr, None)
+            if val is not None:
+                all_level_prices.append(val)
+
+        qg = check_extraction_quality_gates(
+            ticker=ticker or "UNKNOWN",
+            levels=all_level_prices,
+        )
+        if not qg.passed:
+            return AnalyzeImageResponse(
+                filename=file.filename or "",
+                content_type=content_type,
+                size_bytes=len(contents),
+                message="upload received",
+                extraction_confidence=extraction.extraction_confidence,
+                extraction_warning=qg.rejection_reason,
+                analysis=None,
+                debug_info=extraction.debug_info if debug else None,
+            )
+
         try:
             _date_et = date_et or dt.date.today().isoformat()
             try:
@@ -200,6 +331,7 @@ async def analyze_image(
                 scored,
                 extraction.current_price,
                 extraction.levels_payload.atr14,
+                ticker=ticker or "UNKNOWN",
             )
         except Exception:
             error_id = uuid.uuid4().hex[:8]
@@ -247,4 +379,10 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             status_code=500,
             detail=f"An internal error occurred during analysis. Please try again. Ref: {error_id}",
         )
-    return _map_response(result, payload.current_price, payload.levels.atr14)
+    return _map_response(
+        result,
+        payload.current_price,
+        payload.levels.atr14,
+        ticker=payload.ticker,
+        realized_pnl_today=payload.realized_pnl_today,
+    )

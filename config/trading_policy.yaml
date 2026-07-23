@@ -1,0 +1,101 @@
+# trading_policy.yaml
+# ---------------------------------------------------------------------------
+# Strict scalper policy configuration for TheENGINE.
+#
+# Enforces trading discipline:
+#  - Daily PnL cap: stop for the day at +$550 realized.
+#  - Minimum confidence: 0.70 required before any ACTIVE signal.
+#  - Nearby structure required: no action if price is too far from a level.
+#  - Fixed 1:1 RR using the 350-tick template, mapped per instrument.
+# ---------------------------------------------------------------------------
+
+# Hard stop after $550 realized PnL in a single ET trading day.
+daily_profit_cap_usd: 550
+
+# Daily lockout resets at midnight America/New_York.
+lockout_reset_timezone: "America/New_York"
+lockout_reset_time: "00:00"
+
+# Default risk-reward ratio applied to all ACTIVE signals.
+default_rr: 1.0
+
+# Extraction/analysis confidence below this value forces STAND_DOWN.
+min_confidence_for_action: 0.70
+
+# Require a qualified level within proximity of current price for ACTIVE.
+allow_only_nearby_structure: true
+
+# ---------------------------------------------------------------------------
+# Proximity model: determines how close a level must be to current price
+# to qualify as "nearby" for an ACTIVE signal.
+# ---------------------------------------------------------------------------
+proximity_model:
+  type: "min_of_atr_and_ticks"
+  # Level must be within atr_multiple * ATR14 of current price.
+  atr_multiple: 1.0
+  # Absolute tick limits per symbol (fallback when ATR14 unavailable).
+  max_ticks_by_symbol:
+    NQ: 160    # 40 NQ points (40 × 0.25 tick size)
+    ES: 80     # 20 ES points  (20 × 0.25 tick size)
+    YM: 400    # 400 YM ticks  (400 × 1.0 tick size)
+    RTY: 200   # 20 RTY points (20 × 0.10 tick size)
+
+# ---------------------------------------------------------------------------
+# Fixed distance template: maps the "350 tick" intent to each instrument.
+# This is the stop and target distance used for 1:1 RR scalp setups.
+#
+# Derivation:
+#   NQ  tick = 0.25 pts,  $5/tick  → 350 ticks = 87.5 pts → $1,750/contract
+#   ES  tick = 0.25 pts, $12.50/tk → 140 ticks = 35.0 pts → $1,750/contract
+#   YM  tick = 1.0  pts,  $5/tick  → 350 ticks = 350 pts  → $1,750/contract
+#   RTY tick = 0.10 pts,  $5/tick  → 350 ticks = 35.0 pts → $1,750/contract
+# ---------------------------------------------------------------------------
+fixed_distance_template:
+  mode: "symbol_tick_based"
+  description: "maps 350-tick intent into instrument-safe price distance"
+  values_by_symbol:
+    NQ:
+      points: 87.5
+      ticks: 350
+      tick_size: 0.25
+      dollars_per_tick: 5.0
+    ES:
+      points: 35.0
+      ticks: 140
+      tick_size: 0.25
+      dollars_per_tick: 12.50
+    YM:
+      points: 350
+      ticks: 350
+      tick_size: 1.0
+      dollars_per_tick: 5.0
+    RTY:
+      points: 35.0
+      ticks: 350
+      tick_size: 0.10
+      dollars_per_tick: 5.0
+
+# ---------------------------------------------------------------------------
+# RR promotion: disabled until 30+ trades demonstrate 58 %+ win rate.
+# Requires manual override to enable.
+# ---------------------------------------------------------------------------
+rr_promotion:
+  enabled: false
+  requires_manual_override: true
+  min_trades: 30
+  min_win_rate: 0.58
+  max_drawdown_usd: 1000.0
+  min_rule_adherence: 0.95
+
+# ---------------------------------------------------------------------------
+# Extraction quality gates: reject impossible or out-of-range levels.
+# ---------------------------------------------------------------------------
+extraction_quality:
+  # Minimum number of distinct price levels required to proceed.
+  minimum_distinct_levels: 1
+  # Hard floor per instrument: levels below this are physically impossible.
+  instrument_price_floor:
+    NQ: 10000.0    # NQ trades above 10,000
+    ES: 1000.0     # ES trades above 1,000
+    YM: 10000.0    # YM trades above 10,000 (catches 2.41-type OCR errors)
+    RTY: 500.0     # RTY trades above 500
