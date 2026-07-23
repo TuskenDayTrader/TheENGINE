@@ -15,6 +15,8 @@ DEFAULT_THEME = {
     "accent": "#ff6b6b",
 }
 DEFAULT_THEME_FILE = pathlib.Path(__file__).resolve().parents[2] / "config" / "ui_theme.yaml"
+# Matches indented YAML color properties with optional quotes, supporting
+# 3-, 6-, and 8-digit hex color values.
 _THEME_COLOR_LINE_PATTERN = re.compile(r'^\s+([a-z_]+):\s*["\']?(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}))["\']?\s*$')
 
 
@@ -39,7 +41,7 @@ def _load_theme_from_file(theme_file: pathlib.Path) -> dict[str, str]:
             if stripped == "theme:":
                 in_theme_block = True
                 continue
-            if in_theme_block and raw_line == raw_line.lstrip() and stripped.endswith(":"):
+            if in_theme_block and _is_unindented_key(raw_line, stripped):
                 break
 
             if not in_theme_block:
@@ -51,6 +53,10 @@ def _load_theme_from_file(theme_file: pathlib.Path) -> dict[str, str]:
                 theme[key] = value
 
     return theme
+
+
+def _is_unindented_key(raw_line: str, stripped_line: str) -> bool:
+    return bool(stripped_line.endswith(":") and raw_line and raw_line[0] not in (" ", "\t"))
 
 
 def get_theme() -> dict[str, str]:
