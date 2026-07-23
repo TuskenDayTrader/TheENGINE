@@ -1,0 +1,5 @@
+theme:
+  primary_dark: "#0a0a0a"
+  primary_mid: "#8b0000"
+  primary_bright: "#ff0000"
+  accent: "#ff6b6b"

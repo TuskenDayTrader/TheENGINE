@@ -43,3 +43,24 @@ def test_app_page_contains_form_elements():
     # Analyze button
     assert 'type="submit"' in html
     assert "Analyze" in html
+
+
+def test_theme_api_returns_hombre_palette():
+    resp = client.get("/api/theme")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "primary_dark": "#0a0a0a",
+        "primary_mid": "#8b0000",
+        "primary_bright": "#ff0000",
+        "accent": "#ff6b6b",
+    }
+
+
+def test_theme_api_accepts_hombre_env_override(monkeypatch):
+    monkeypatch.setenv("UI_THEME", "hombre_red")
+
+    resp = client.get("/api/theme")
+
+    assert resp.status_code == 200
+    assert resp.json()["primary_mid"] == "#8b0000"
