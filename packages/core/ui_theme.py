@@ -15,7 +15,7 @@ DEFAULT_THEME = {
     "accent": "#ff6b6b",
 }
 DEFAULT_THEME_FILE = pathlib.Path(__file__).resolve().parents[2] / "config" / "ui_theme.yaml"
-_THEME_LINE_PATTERN = re.compile(r'^\s+([a-z_]+):\s*["\']?(#[0-9a-fA-F]{6})["\']?\s*$')
+_THEME_COLOR_LINE_PATTERN = re.compile(r'^\s+([a-z_]+):\s*["\']?(#[0-9a-fA-F]{6})["\']?\s*$')
 
 
 def _theme_file_for(theme_name: str) -> pathlib.Path:
@@ -31,29 +31,38 @@ def _load_theme_from_file(theme_file: pathlib.Path) -> dict[str, str]:
         return theme
 
     in_theme_block = False
-    for raw_line in theme_file.read_text(encoding="utf-8").splitlines():
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped == "theme:":
-            in_theme_block = True
-            continue
-        if in_theme_block and not raw_line.startswith("  "):
-            break
+    with theme_file.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped == "theme:":
+                in_theme_block = True
+                continue
+            if in_theme_block and not raw_line[:1].isspace():
+                break
 
-        if not in_theme_block:
-            continue
+            if not in_theme_block:
+                continue
 
-        match = _THEME_LINE_PATTERN.match(raw_line)
-        if match:
-            key, value = match.groups()
-            theme[key] = value
+            match = _THEME_COLOR_LINE_PATTERN.match(raw_line)
+            if match:
+                key, value = match.groups()
+                theme[key] = value
 
     return theme
 
 
 def get_theme() -> dict[str, str]:
-    requested_theme = os.getenv("UI_THEME", DEFAULT_THEME_NAME).strip() or DEFAULT_THEME_NAME
+    raw_theme_name = os.getenv("UI_THEME")
+    if raw_theme_name is None:
+        requested_theme = DEFAULT_THEME_NAME
+    else:
+        requested_theme = raw_theme_name.strip()
+        if not requested_theme:
+            logger.warning("Empty UI_THEME value detected; falling back to %s", DEFAULT_THEME_NAME)
+            requested_theme = DEFAULT_THEME_NAME
+
     theme_file = _theme_file_for(requested_theme)
     if requested_theme != DEFAULT_THEME_NAME and not theme_file.exists():
         logger.warning("Unsupported UI_THEME '%s'; falling back to %s", requested_theme, DEFAULT_THEME_NAME)
