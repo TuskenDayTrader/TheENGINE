@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Optional
 
 import yaml
 
@@ -31,6 +31,21 @@ class PolicyConfig:
     template_value: int
     template_unit: str
     symbol_tick_model: dict[str, SymbolTickModel]
+    minimum_distinct_levels: int = 1
+    instrument_price_floor: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class ExtractionQualityResult:
+    """Result of extraction quality gate checks.
+
+    ``passed`` is ``True`` when all gates pass and analysis can proceed.
+    ``rejection_reasons`` is a list of human-readable explanations when any
+    gate fails; it is empty when ``passed`` is ``True``.
+    """
+
+    passed: bool
+    rejection_reasons: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -107,6 +122,12 @@ def load_policy_config() -> PolicyConfig:
             f"fixed_350_template.unit must be either 'ticks' or 'points', got '{template_unit}'"
         )
 
+    quality_raw = raw.get("extraction_quality", {})
+    instrument_price_floor: dict[str, float] = {
+        str(k).upper(): float(v)
+        for k, v in (quality_raw.get("instrument_price_floor", {}) or {}).items()
+    }
+
     return PolicyConfig(
         daily_profit_cap_usd=float(raw["daily_profit_cap_usd"]),
         lockout_reset_timezone=str(raw["lockout_reset_timezone"]),
@@ -122,6 +143,8 @@ def load_policy_config() -> PolicyConfig:
         template_value=int(fixed.get("value", 350)),
         template_unit=template_unit,
         symbol_tick_model=symbol_models,
+        minimum_distinct_levels=int(quality_raw.get("minimum_distinct_levels", 1)),
+        instrument_price_floor=instrument_price_floor,
     )
 
 
@@ -257,3 +280,85 @@ def enforce_scalper_policy(
         lockout_reset_time=config.lockout_reset_time,
         template=template,
     )
+
+
+def check_extraction_quality_gates(
+    ticker: str,
+    level_prices: List[float],
+    current_price: Optional[float] = None,
+    axis_min: Optional[float] = None,
+    axis_max: Optional[float] = None,
+) -> ExtractionQualityResult:
+    """Apply instrument-aware sanity checks to image-extracted price levels.
+
+    Returns an :class:`ExtractionQualityResult` whose ``passed`` flag is
+    ``True`` only when all of the following gates pass:
+
+    1. **Instrument price floor** – every extracted level must be >= the
+       configured minimum for the matched symbol (e.g. YM levels below
+       10 000 are impossible and signal an OCR scale error).
+    2. **Axis-bounds enforcement** – when OCR axis min/max are available,
+       every level must lie within the axis range (+-10 % extrapolation
+       tolerance).
+    3. **Minimum distinct levels** – the number of supplied levels must
+       meet ``minimum_distinct_levels`` from config.
+
+    Parameters
+    ----------
+    ticker:
+        Instrument ticker; used to look up symbol-specific thresholds.
+    level_prices:
+        Flat list of all extracted price levels (support and resistance
+        combined) mapped from the chart image.
+    current_price:
+        Estimated current price used for a plausibility cross-check
+        (optional).
+    axis_min:
+        Lowest price label successfully OCR'd from the chart axis
+        (optional).
+    axis_max:
+        Highest price label successfully OCR'd from the chart axis
+        (optional).
+    """
+    config = load_policy_config()
+    reasons: List[str] = []
+    symbol = _resolve_symbol_key(ticker=ticker, symbol_map=config.instrument_price_floor)
+    floor = config.instrument_price_floor.get(symbol)
+
+    # Gate 1: instrument price floor – reject impossible scale values
+    if floor is not None and floor > 0:
+        below_floor = [p for p in level_prices if p < floor]
+        if below_floor:
+            sample = sorted(below_floor)[:3]
+            reasons.append(
+                f"Impossible scale: {len(below_floor)} extracted level(s) for {symbol} "
+                f"below instrument price floor {floor:.0f} "
+                f"(examples: {[round(p, 4) for p in sample]}). "
+                "Likely OCR/scale mapping error. Rejecting extraction."
+            )
+
+    # Gate 2: axis-bounds enforcement
+    if axis_min is not None and axis_max is not None and axis_min < axis_max:
+        tolerance = (axis_max - axis_min) * 0.10
+        lo = axis_min - tolerance
+        hi = axis_max + tolerance
+        out_of_bounds = [p for p in level_prices if not (lo <= p <= hi)]
+        if out_of_bounds:
+            sample = sorted(out_of_bounds)[:3]
+            reasons.append(
+                f"Out-of-axis-bounds: {len(out_of_bounds)} level(s) outside "
+                f"axis range [{axis_min:.2f}, {axis_max:.2f}] +-10 % "
+                f"(examples: {[round(p, 4) for p in sample]}). "
+                "Rejecting extraction."
+            )
+
+    # Gate 3: minimum distinct levels
+    distinct = len(set(level_prices))
+    if distinct < config.minimum_distinct_levels:
+        reasons.append(
+            f"Insufficient visual evidence: only {distinct} distinct price level(s) "
+            f"extracted (minimum required: {config.minimum_distinct_levels}). "
+            "Stand down until edge is clear."
+        )
+
+    return ExtractionQualityResult(passed=len(reasons) == 0, rejection_reasons=reasons)

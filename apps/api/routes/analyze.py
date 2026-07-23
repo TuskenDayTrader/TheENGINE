@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from packages.core.image_extractor import ExtractionResult, extract_from_image
 from packages.core.models import ActionState, AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
 from packages.core.output import build_poster
-from packages.core.policy import PolicyDecision, enforce_scalper_policy
+from packages.core.policy import ExtractionQualityResult, PolicyDecision, check_extraction_quality_gates, enforce_scalper_policy
 from packages.core.scoring import score
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,21 @@ def _confidence_to_float(tag: ConvictionTag) -> float:
     if tag == ConvictionTag.MODERATE:
         return 0.6
     return 0.3
+
+
+def _levels_to_price_list(payload: LevelsPayload) -> list[float]:
+    """Return all non-None, non-ATR price values from a LevelsPayload."""
+    import dataclasses
+
+    skip = {"atr14"}
+    prices: list[float] = []
+    for f in dataclasses.fields(payload):
+        if f.name in skip:
+            continue
+        val = getattr(payload, f.name)
+        if isinstance(val, (int, float)) and val is not None:
+            prices.append(float(val))
+    return prices
 
 
 def _map_level(level: LevelDecision, current_price: float, atr_14: float | None) -> ResponseLevel:
@@ -251,40 +266,54 @@ async def analyze_image(
     analysis: AnalyzeResponse | None = None
     if extraction.levels_payload is not None and extraction.current_price is not None:
         try:
-            _date_et = date_et or dt.date.today().isoformat()
-            try:
-                _timeframe_enum = Timeframe(timeframe or "30m")
-            except ValueError:
-                _timeframe_enum = Timeframe.M30
-
-            scored = score(
-                AnalysisPayload(
-                    date_et=_date_et,
-                    ticker=ticker or "UNKNOWN",
-                    timeframe=_timeframe_enum.value,
-                    lookback_days=lookback_days or 5,
-                    current_price=extraction.current_price,
-                    levels=extraction.levels_payload,
-                )
-            )
-            policy_decision = enforce_scalper_policy(
-                result=scored,
+            # Quality gates: reject impossible/out-of-range extraction results
+            _level_prices = _levels_to_price_list(extraction.levels_payload)
+            qg: ExtractionQualityResult = check_extraction_quality_gates(
+                ticker=ticker or "UNKNOWN",
+                level_prices=_level_prices,
                 current_price=extraction.current_price,
-                contract_ticker=ticker or "UNKNOWN",
-                realized_pnl_usd=realized_pnl_usd,
-                atr14=extraction.levels_payload.atr14,
             )
-            _mutate_result_with_policy(
-                result=scored,
-                policy_reasons=policy_decision.stand_down_reasons,
-                enforced_state=policy_decision.enforced_action_state,
-            )
-            analysis = _map_response(
-                scored,
-                extraction.current_price,
-                extraction.levels_payload.atr14,
-                policy_decision,
-            )
+            if not qg.passed:
+                extraction.warning = (
+                    (extraction.warning + " | " if extraction.warning else "")
+                    + "Quality gate failed: "
+                    + "; ".join(qg.rejection_reasons)
+                )
+            else:
+                _date_et = date_et or dt.date.today().isoformat()
+                try:
+                    _timeframe_enum = Timeframe(timeframe or "30m")
+                except ValueError:
+                    _timeframe_enum = Timeframe.M30
+
+                scored = score(
+                    AnalysisPayload(
+                        date_et=_date_et,
+                        ticker=ticker or "UNKNOWN",
+                        timeframe=_timeframe_enum.value,
+                        lookback_days=lookback_days or 5,
+                        current_price=extraction.current_price,
+                        levels=extraction.levels_payload,
+                    )
+                )
+                policy_decision = enforce_scalper_policy(
+                    result=scored,
+                    current_price=extraction.current_price,
+                    contract_ticker=ticker or "UNKNOWN",
+                    realized_pnl_usd=realized_pnl_usd,
+                    atr14=extraction.levels_payload.atr14,
+                )
+                _mutate_result_with_policy(
+                    result=scored,
+                    policy_reasons=policy_decision.stand_down_reasons,
+                    enforced_state=policy_decision.enforced_action_state,
+                )
+                analysis = _map_response(
+                    scored,
+                    extraction.current_price,
+                    extraction.levels_payload.atr14,
+                    policy_decision,
+                )
         except Exception:
             error_id = uuid.uuid4().hex[:8]
             logger.exception(
