@@ -8,3 +8,4 @@ opencv-python-headless==5.0.0.93
 pytesseract>=0.3.10,<1
 Pillow>=10.0,<13
 numpy==2.5.1
+PyYAML>=6.0,<7

@@ -1,0 +1,50 @@
+daily_profit_cap_usd: 550
+lockout_reset_timezone: "America/New_York"
+lockout_reset_time: "00:00"
+default_rr: 1.0
+min_confidence_for_action: 0.70
+allow_only_nearby_structure: true
+proximity_model:
+  type: "min_of_atr_and_ticks"
+  atr_multiple: 0.25
+  max_ticks_by_symbol:
+    NQ: 40
+    ES: 16
+    YM: 100
+    RTY: 20
+fixed_350_template:
+  value: 350
+  unit: ticks
+  symbol_tick_model:
+    NQ:
+      tick_size: 0.25
+      ticks_per_point: 4
+      dollars_per_tick: 5.0
+    ES:
+      tick_size: 0.25
+      ticks_per_point: 4
+      dollars_per_tick: 12.5
+    YM:
+      tick_size: 1.0
+      ticks_per_point: 1
+      dollars_per_tick: 5.0
+    RTY:
+      tick_size: 0.1
+      ticks_per_point: 10
+      dollars_per_tick: 5.0
+
+# ---------------------------------------------------------------------------
+# Extraction quality gates
+# ---------------------------------------------------------------------------
+# minimum_distinct_levels: minimum number of distinct price levels required
+#   on each side (resistance/support) before a full analysis is attempted.
+# instrument_price_floor: per-symbol minimum plausible price magnitude.
+#   Any extracted level below this floor is treated as an OCR/scale error
+#   and the entire result is rejected with STAND_DOWN_NO_EDGE.
+extraction_quality:
+  minimum_distinct_levels: 1
+  instrument_price_floor:
+    NQ: 10000.0
+    ES: 1000.0
+    YM: 10000.0
+    RTY: 500.0

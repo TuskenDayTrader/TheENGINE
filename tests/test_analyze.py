@@ -7,6 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+import packages.core.policy as policy_mod
+from packages.core.policy import PolicyConfig, SymbolTickModel
 
 client = TestClient(app)
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
@@ -50,7 +52,14 @@ def test_analyze_es_fixture_success():
     payload = _load_fixture("es_sample.json")
     resp = client.post("/analyze", json=payload)
     assert resp.status_code == 200, resp.text
-    _assert_contract(resp.json())
+    data = resp.json()
+    _assert_contract(data)
+    assert "policy" in data
+    assert data["policy"]["rr_target"] == pytest.approx(1.0)
+    assert data["policy"]["daily_profit_cap_usd"] == pytest.approx(550.0)
+    assert data["policy"]["enforced_action_state"] in ("ACTIVE_LONG", "ACTIVE_SHORT", "STAND_DOWN")
+    assert data["policy"]["lockout_active"] is False
+    assert isinstance(data["policy"]["stand_down_reasons"], list)
 
 
 def test_missing_required_field_returns_422():
@@ -455,3 +464,45 @@ def test_daily_lockout_negative_does_not_lock_out():
     resp = client.post("/analyze", json=_nq_payload(daily_pnl=-200.0))
     assert resp.status_code == 200, resp.text
     assert resp.json()["action_state"] != "STOP_TRADING_DAY"
+
+
+def test_analyze_profit_cap_lockout_forces_stand_down():
+    payload = _load_fixture("es_sample.json")
+    payload["realized_pnl_usd"] = 600.0
+    resp = client.post("/analyze", json=payload)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["action_state"] == "STAND_DOWN"
+    assert data["policy"]["lockout_active"] is True
+    assert any("Daily lockout active" in reason for reason in data["policy"]["stand_down_reasons"])
+
+
+def test_analyze_policy_uses_configured_rr_in_template(monkeypatch):
+    custom_cfg = PolicyConfig(
+        daily_profit_cap_usd=550.0,
+        lockout_reset_timezone="America/New_York",
+        lockout_reset_time="00:00",
+        default_rr=1.5,
+        min_confidence_for_action=0.70,
+        allow_only_nearby_structure=True,
+        proximity_model_type="min_of_atr_and_ticks",
+        proximity_atr_multiple=0.25,
+        proximity_max_ticks_by_symbol={"NQ": 40, "ES": 16},
+        template_value=350,
+        template_unit="ticks",
+        symbol_tick_model={
+            "NQ": SymbolTickModel(tick_size=0.25, ticks_per_point=4.0, dollars_per_tick=5.0),
+            "ES": SymbolTickModel(tick_size=0.25, ticks_per_point=4.0, dollars_per_tick=12.5),
+        },
+    )
+    monkeypatch.setattr(policy_mod, "load_policy_config", lambda: custom_cfg)
+
+    payload = _load_fixture("nq_sample.json")
+    resp = client.post("/analyze", json=payload)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    policy = data["policy"]
+    assert policy["rr_target"] == pytest.approx(1.5)
+    assert policy["template_350"]["estimated_reward_usd"] == pytest.approx(
+        policy["template_350"]["estimated_risk_usd"] * 1.5
+    )

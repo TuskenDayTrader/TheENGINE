@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from packages.core.image_extractor import ExtractionResult, extract_from_image
 from packages.core.models import ActionState, AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
 from packages.core.output import build_poster
+from packages.core.policy import ExtractionQualityResult, PolicyDecision, check_extraction_quality_gates, enforce_scalper_policy
 from packages.core.scoring import score
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class AnalyzeRequest(BaseModel):
     timeframe: Timeframe
     lookback_days: int = Field(ge=1)
     current_price: float = Field(gt=0)
+    realized_pnl_usd: float | None = None
     levels: LevelsInput
     daily_pnl: float | None = Field(default=None, description="Realized P&L for the trading day in USD. If >= $550, returns STOP_TRADING_DAY.")
 
@@ -90,6 +92,7 @@ class AnalyzeResponse(BaseModel):
     action_state: str
     confidence: float
     poster_text: str
+    policy: dict
 
 
 class AnalyzeImageResponse(BaseModel):
@@ -111,6 +114,21 @@ def _confidence_to_float(tag: ConvictionTag) -> float:
     return 0.3
 
 
+def _levels_to_price_list(payload: LevelsPayload) -> list[float]:
+    """Return all non-None, non-ATR price values from a LevelsPayload."""
+    import dataclasses
+
+    skip = {"atr14"}
+    prices: list[float] = []
+    for f in dataclasses.fields(payload):
+        if f.name in skip:
+            continue
+        val = getattr(payload, f.name)
+        if isinstance(val, (int, float)) and val is not None:
+            prices.append(float(val))
+    return prices
+
+
 def _map_level(level: LevelDecision, current_price: float, atr_14: float | None) -> ResponseLevel:
     """Map a core level using a precomputed 14-period ATR value for normalized distance."""
     distance_atr = None
@@ -125,7 +143,17 @@ def _map_level(level: LevelDecision, current_price: float, atr_14: float | None)
     )
 
 
-def _map_response(result: AnalysisResult, current_price: float, atr_14: float | None) -> AnalyzeResponse:
+def _map_response(
+    result: AnalysisResult,
+    current_price: float,
+    atr_14: float | None,
+    policy: PolicyDecision | None = None,
+) -> AnalyzeResponse:
+    policy_payload = _policy_to_payload(
+        policy=policy,
+        fallback_state=result.action_state,
+        fallback_confidence=result.confidence,
+    )
     return AnalyzeResponse(
         ticker=result.ticker,
         date_et=result.date_et,
@@ -136,7 +164,64 @@ def _map_response(result: AnalysisResult, current_price: float, atr_14: float | 
         action_state=result.action_state.value,
         confidence=_confidence_to_float(result.confidence),
         poster_text=build_poster(result),
+        policy=policy_payload,
     )
+
+
+def _mutate_result_with_policy(
+    result: AnalysisResult, policy_reasons: list[str], enforced_state: ActionState
+) -> None:
+    """Mutate the scoring result in-place so poster output reflects policy enforcement."""
+    result.action_state = enforced_state
+    if policy_reasons and (not result.rationale or "Policy:" not in result.rationale):
+        result.rationale = f"{result.rationale or ''} Policy: {' '.join(policy_reasons)}"
+
+
+def _policy_to_payload(
+    policy: PolicyDecision | None,
+    fallback_state: ActionState,
+    fallback_confidence: ConvictionTag,
+) -> dict:
+    if policy is None:
+        return {
+            "original_action_state": fallback_state.value,
+            "enforced_action_state": fallback_state.value,
+            "lockout_active": False,
+            "daily_profit_cap_usd": None,
+            "lockout_reset_timezone": None,
+            "lockout_reset_time": None,
+            "rr_target": None,
+            "confidence_value": _confidence_to_float(fallback_confidence),
+            "min_confidence_for_action": None,
+            "nearby_structure_threshold": None,
+            "stand_down_reasons": [],
+            "template_350": None,
+        }
+    return {
+        "original_action_state": policy.original_action_state.value,
+        "enforced_action_state": policy.enforced_action_state.value,
+        "lockout_active": policy.lockout_active,
+        "daily_profit_cap_usd": policy.daily_profit_cap_usd,
+        "lockout_reset_timezone": policy.lockout_reset_timezone,
+        "lockout_reset_time": policy.lockout_reset_time,
+        "rr_target": policy.rr_target,
+        "confidence_value": policy.confidence_value,
+        "min_confidence_for_action": policy.confidence_threshold,
+        "nearby_structure_threshold": policy.nearby_structure_threshold,
+        "stand_down_reasons": policy.stand_down_reasons,
+        "template_350": {
+            "symbol": policy.template.symbol,
+            "value": policy.template.value,
+            "unit": policy.template.unit,
+            "tick_size": policy.template.tick_size,
+            "ticks_per_point": policy.template.ticks_per_point,
+            "dollars_per_tick": policy.template.dollars_per_tick,
+            "template_ticks": policy.template.template_ticks,
+            "template_price_distance": policy.template.template_price_distance,
+            "estimated_risk_usd": policy.template.estimated_risk_usd,
+            "estimated_reward_usd": policy.template.estimated_reward_usd,
+        },
+    }
 
 
 @router.post("/analyze-image", response_model=AnalyzeImageResponse, response_model_exclude_none=True)
@@ -146,6 +231,7 @@ async def analyze_image(
     timeframe: str | None = Form(default=None),
     lookback_days: int | None = Form(default=None),
     date_et: str | None = Form(default=None),
+    realized_pnl_usd: float | None = Form(default=None),
     debug: bool = Query(default=False),
 ) -> AnalyzeImageResponse:
     content_type = file.content_type or ""
@@ -182,27 +268,54 @@ async def analyze_image(
     analysis: AnalyzeResponse | None = None
     if extraction.levels_payload is not None and extraction.current_price is not None:
         try:
-            _date_et = date_et or dt.date.today().isoformat()
-            try:
-                _timeframe_enum = Timeframe(timeframe or "30m")
-            except ValueError:
-                _timeframe_enum = Timeframe.M30
-
-            scored = score(
-                AnalysisPayload(
-                    date_et=_date_et,
-                    ticker=ticker or "UNKNOWN",
-                    timeframe=_timeframe_enum.value,
-                    lookback_days=lookback_days or 5,
-                    current_price=extraction.current_price,
-                    levels=extraction.levels_payload,
+            # Quality gates: reject impossible/out-of-range extraction results
+            _level_prices = _levels_to_price_list(extraction.levels_payload)
+            qg: ExtractionQualityResult = check_extraction_quality_gates(
+                ticker=ticker or "UNKNOWN",
+                level_prices=_level_prices,
+                current_price=extraction.current_price,
+            )
+            if not qg.passed:
+                extraction.warning = (
+                    (extraction.warning + " | " if extraction.warning else "")
+                    + "Quality gate failed: "
+                    + "; ".join(qg.rejection_reasons)
                 )
-            )
-            analysis = _map_response(
-                scored,
-                extraction.current_price,
-                extraction.levels_payload.atr14,
-            )
+            else:
+                _date_et = date_et or dt.date.today().isoformat()
+                try:
+                    _timeframe_enum = Timeframe(timeframe or "30m")
+                except ValueError:
+                    _timeframe_enum = Timeframe.M30
+
+                scored = score(
+                    AnalysisPayload(
+                        date_et=_date_et,
+                        ticker=ticker or "UNKNOWN",
+                        timeframe=_timeframe_enum.value,
+                        lookback_days=lookback_days or 5,
+                        current_price=extraction.current_price,
+                        levels=extraction.levels_payload,
+                    )
+                )
+                policy_decision = enforce_scalper_policy(
+                    result=scored,
+                    current_price=extraction.current_price,
+                    contract_ticker=ticker or "UNKNOWN",
+                    realized_pnl_usd=realized_pnl_usd,
+                    atr14=extraction.levels_payload.atr14,
+                )
+                _mutate_result_with_policy(
+                    result=scored,
+                    policy_reasons=policy_decision.stand_down_reasons,
+                    enforced_state=policy_decision.enforced_action_state,
+                )
+                analysis = _map_response(
+                    scored,
+                    extraction.current_price,
+                    extraction.levels_payload.atr14,
+                    policy_decision,
+                )
         except Exception:
             error_id = uuid.uuid4().hex[:8]
             logger.exception(
@@ -245,6 +358,20 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
                 "Confidence: HIGH\n"
                 "Rationale: Daily profit target reached. No further trading today. Bank it."
             ),
+            policy={
+                "original_action_state": ActionState.STOP_TRADING_DAY.value,
+                "enforced_action_state": ActionState.STOP_TRADING_DAY.value,
+                "lockout_active": True,
+                "daily_profit_cap_usd": DAILY_PNL_CAP,
+                "lockout_reset_timezone": None,
+                "lockout_reset_time": None,
+                "rr_target": None,
+                "confidence_value": 1.0,
+                "min_confidence_for_action": None,
+                "nearby_structure_threshold": None,
+                "stand_down_reasons": [],
+                "template_350": None,
+            },
         )
     # ----------------------------------------------------------------------
     try:
@@ -258,6 +385,18 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
                 levels=LevelsPayload(**payload.levels.model_dump()),
             )
         )
+        policy_decision = enforce_scalper_policy(
+            result=result,
+            current_price=payload.current_price,
+            contract_ticker=payload.ticker,
+            realized_pnl_usd=payload.realized_pnl_usd,
+            atr14=payload.levels.atr14,
+        )
+        _mutate_result_with_policy(
+            result=result,
+            policy_reasons=policy_decision.stand_down_reasons,
+            enforced_state=policy_decision.enforced_action_state,
+        )
     except Exception:
         error_id = uuid.uuid4().hex[:8]
         logger.exception(
@@ -270,4 +409,4 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             status_code=500,
             detail=f"An internal error occurred during analysis. Please try again. Ref: {error_id}",
         )
-    return _map_response(result, payload.current_price, payload.levels.atr14)
+    return _map_response(result, payload.current_price, payload.levels.atr14, policy_decision)
