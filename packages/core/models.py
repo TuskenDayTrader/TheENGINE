@@ -25,6 +25,7 @@ class ActionState(str, Enum):
     ACTIVE_LONG = "ACTIVE_LONG"
     ACTIVE_SHORT = "ACTIVE_SHORT"
     STAND_DOWN = "STAND_DOWN"
+    STOP_TRADING_DAY = "STOP_TRADING_DAY"
 
 
 class ConvictionTag(str, Enum):
