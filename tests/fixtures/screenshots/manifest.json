@@ -1,0 +1,55 @@
+{
+  "fixtures": [
+    {
+      "ticker": "NQ",
+      "filename": "17_NQ1!_2026-07-22_21-43-17.png",
+      "path": "NQ/2026/07/22/21/43/17_NQ1!_2026-07-22_21-43-17.png",
+      "timestamp": "2026-07-22T21:43:17Z",
+      "file_size_kb": 11,
+      "hash": "493a808c793d1e8f1015999fcb1cc2e403ad4d71993cbaf52979c6d370fb22f6",
+      "expected_action": "STAND_DOWN",
+      "notes": "Ratio 1.01, threshold 1.15"
+    },
+    {
+      "ticker": "ES",
+      "filename": "33_ES1!_2026-07-22_21-43-33.png",
+      "path": "ES/2026/07/22/21/43/33_ES1!_2026-07-22_21-43-33.png",
+      "timestamp": "2026-07-22T21:43:33Z",
+      "file_size_kb": 10,
+      "hash": "6cea5c283f624dfd4677bb272682eac07e6d114801bcd97110b2ec64d3cd7d6d",
+      "expected_action": "STAND_DOWN",
+      "notes": "Ratio 1.02, threshold 1.15"
+    },
+    {
+      "ticker": "RTY",
+      "filename": "53_RTY_2026-07-22_21-43-53.png",
+      "path": "RTY/2026/07/22/21/43/53_RTY_2026-07-22_21-43-53.png",
+      "timestamp": "2026-07-22T21:43:53Z",
+      "file_size_kb": 10,
+      "hash": "76763c44b4a2b435dec03e567b2168aa4c9cde2219468c559c7808f45e33ac75",
+      "expected_action": "STAND_DOWN",
+      "notes": "Ratio 1.12, threshold 1.15"
+    },
+    {
+      "ticker": "YM",
+      "filename": "14_YM1!_2026-07-22_21-44-14.png",
+      "path": "YM/2026/07/22/21/44/14_YM1!_2026-07-22_21-44-14.png",
+      "timestamp": "2026-07-22T21:44:14Z",
+      "file_size_kb": 11,
+      "hash": "4efa8d67867674e136ff048a369f95862a2fb19202b94b32d977c01479c290ce",
+      "expected_action": "STAND_DOWN (weak bias)",
+      "notes": "Ratio 1.14, threshold 1.15"
+    }
+  ],
+  "summary": {
+    "total_fixtures": 4,
+    "tickers": [
+      "ES",
+      "NQ",
+      "RTY",
+      "YM"
+    ],
+    "date_range": "2026-07-22 to 2026-07-22",
+    "last_updated": "2026-07-22T21:44:14Z"
+  }
+}
