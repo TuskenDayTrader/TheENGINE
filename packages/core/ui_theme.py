@@ -16,7 +16,8 @@ DEFAULT_THEME = {
 }
 DEFAULT_THEME_FILE = pathlib.Path(__file__).resolve().parents[2] / "config" / "ui_theme.yaml"
 # Matches indented YAML color properties with optional quotes, supporting
-# 3-, 6-, and 8-digit hex color values.
+# 3-, 6-, and 8-digit hex color values:
+#   <indent><key>: "#rgb|#rrggbb|#rrggbbaa"
 _THEME_COLOR_LINE_PATTERN = re.compile(r'^\s+([a-z_]+):\s*["\']?(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}))["\']?\s*$')
 
 
@@ -27,6 +28,7 @@ def _theme_file_for(theme_name: str) -> pathlib.Path:
 
 
 def _load_theme_from_file(theme_file: pathlib.Path) -> dict[str, str]:
+    """Load theme colors from a simple YAML file, falling back to defaults if missing."""
     theme = DEFAULT_THEME.copy()
 
     if not theme_file.exists():
@@ -41,6 +43,7 @@ def _load_theme_from_file(theme_file: pathlib.Path) -> dict[str, str]:
             if stripped == "theme:":
                 in_theme_block = True
                 continue
+            # Stop parsing when the theme block ends and a new top-level YAML key begins.
             if in_theme_block and _is_unindented_key(raw_line, stripped):
                 break
 

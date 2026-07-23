@@ -17,6 +17,7 @@ theme:
 Optional environment override:
 
 ```bash
+# Explicitly keep using the default built-in palette
 UI_THEME=hombre_red python -m uvicorn apps.api.main:app --reload --port 8000
 ```
 
