@@ -404,6 +404,68 @@ def test_analyze_image_no_debug_param_excludes_debug_info(monkeypatch):
     assert "debug_info" not in data
 
 
+# ---------------------------------------------------------------------------
+# Daily $550 lockout gate tests
+# ---------------------------------------------------------------------------
+
+def _nq_payload(**overrides) -> dict:
+    """Base NQ payload for lockout tests."""
+    payload = _load_fixture("nq_sample.json")
+    payload.update(overrides)
+    return payload
+
+
+def test_daily_lockout_at_550_returns_stop_trading_day():
+    """Exactly $550 triggers STOP_TRADING_DAY."""
+    resp = client.post("/analyze", json=_nq_payload(daily_pnl=550.0))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["action_state"] == "STOP_TRADING_DAY"
+    assert data["confidence"] == 1.0
+    assert "STOP_TRADING_DAY" in data["poster_text"]
+    assert "550" in data["poster_text"]
+    assert data["strongest_resistance"] == []
+    assert data["strongest_support"] == []
+
+
+def test_daily_lockout_above_550_returns_stop_trading_day():
+    """Any amount above $550 (e.g. $600, $1000) also locks out."""
+    for pnl in (600.0, 750.0, 1000.0):
+        resp = client.post("/analyze", json=_nq_payload(daily_pnl=pnl))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["action_state"] == "STOP_TRADING_DAY", f"Expected lockout at daily_pnl={pnl}"
+
+
+def test_daily_lockout_below_550_does_not_lock_out():
+    """$549.99 (below cap) proceeds to normal analysis."""
+    resp = client.post("/analyze", json=_nq_payload(daily_pnl=549.99))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["action_state"] != "STOP_TRADING_DAY"
+
+
+def test_daily_lockout_omitted_does_not_lock_out():
+    """Omitting daily_pnl entirely proceeds to normal analysis."""
+    payload = _load_fixture("nq_sample.json")  # no daily_pnl key
+    assert "daily_pnl" not in payload
+    resp = client.post("/analyze", json=payload)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["action_state"] != "STOP_TRADING_DAY"
+
+
+def test_daily_lockout_zero_does_not_lock_out():
+    """$0 P&L should not lock out."""
+    resp = client.post("/analyze", json=_nq_payload(daily_pnl=0.0))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["action_state"] != "STOP_TRADING_DAY"
+
+
+def test_daily_lockout_negative_does_not_lock_out():
+    """Negative P&L (a loss day) should never lock out."""
+    resp = client.post("/analyze", json=_nq_payload(daily_pnl=-200.0))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["action_state"] != "STOP_TRADING_DAY"
+
+
 def test_analyze_profit_cap_lockout_forces_stand_down():
     payload = _load_fixture("es_sample.json")
     payload["realized_pnl_usd"] = 600.0
