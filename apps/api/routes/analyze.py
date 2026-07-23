@@ -9,13 +9,14 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from packages.core.image_extractor import ExtractionResult, extract_from_image
-from packages.core.models import AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
+from packages.core.models import ActionState, AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
 from packages.core.output import build_poster
 from packages.core.scoring import score
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 ALLOWED_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+DAILY_PNL_CAP: float = 550.0  # USD — stop trading once realized P&L reaches this amount
 
 
 class Timeframe(str, Enum):
@@ -62,6 +63,7 @@ class AnalyzeRequest(BaseModel):
     lookback_days: int = Field(ge=1)
     current_price: float = Field(gt=0)
     levels: LevelsInput
+    daily_pnl: float | None = Field(default=None, description="Realized P&L for the trading day in USD. If >= $550, returns STOP_TRADING_DAY.")
 
     @field_validator("date_et")
     @classmethod
@@ -224,6 +226,27 @@ async def analyze_image(
 
 @router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
+    # --- Daily profit cap: $550 lockout -----------------------------------
+    if payload.daily_pnl is not None and payload.daily_pnl >= DAILY_PNL_CAP:
+        return AnalyzeResponse(
+            ticker=payload.ticker,
+            date_et=payload.date_et,
+            strongest_resistance=[],
+            weakest_resistance=[],
+            strongest_support=[],
+            weakest_support=[],
+            action_state=ActionState.STOP_TRADING_DAY.value,
+            confidence=1.0,
+            poster_text=(
+                f"{payload.ticker} DAILY CAP REACHED\n"
+                f"Date: {payload.date_et}\n"
+                f"Realized P&L: ${payload.daily_pnl:.2f} >= ${DAILY_PNL_CAP:.0f} daily cap.\n"
+                "Action State: STOP_TRADING_DAY\n"
+                "Confidence: HIGH\n"
+                "Rationale: Daily profit target reached. No further trading today. Bank it."
+            ),
+        )
+    # ----------------------------------------------------------------------
     try:
         result = score(
             AnalysisPayload(
