@@ -71,6 +71,7 @@ def test_get_theme_accepts_alternate_theme_via_env(monkeypatch):
     )
 
     try:
+        assert ui_theme.get_theme()["primary_dark"] == "#0a0a0a"
         monkeypatch.setenv("UI_THEME", "nightfall")
         assert ui_theme.get_theme() == {
             "primary_dark": "#111111",

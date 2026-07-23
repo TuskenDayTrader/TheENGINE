@@ -15,7 +15,7 @@ DEFAULT_THEME = {
     "accent": "#ff6b6b",
 }
 DEFAULT_THEME_FILE = pathlib.Path(__file__).resolve().parents[2] / "config" / "ui_theme.yaml"
-_THEME_COLOR_LINE_PATTERN = re.compile(r'^\s+([a-z_]+):\s*["\']?(#[0-9a-fA-F]{6})["\']?\s*$')
+_THEME_COLOR_LINE_PATTERN = re.compile(r'^\s+([a-z_]+):\s*["\']?(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}))["\']?\s*$')
 
 
 def _theme_file_for(theme_name: str) -> pathlib.Path:
@@ -39,7 +39,7 @@ def _load_theme_from_file(theme_file: pathlib.Path) -> dict[str, str]:
             if stripped == "theme:":
                 in_theme_block = True
                 continue
-            if in_theme_block and not raw_line[:1].isspace():
+            if in_theme_block and raw_line == raw_line.lstrip() and stripped.endswith(":"):
                 break
 
             if not in_theme_block:
