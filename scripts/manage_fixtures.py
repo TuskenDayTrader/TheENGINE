@@ -276,8 +276,7 @@ def cmd_timeline(args: argparse.Namespace) -> int:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
-    date_str = args.date
-    dt.datetime.strptime(date_str, "%Y-%m-%d")
+    date_str = dt.datetime.strptime(args.date, "%Y-%m-%d").date().isoformat()
 
     entries = _filtered_entries(Path(args.fixtures_root))
     entries = [entry for entry in entries if entry["timestamp"].startswith(date_str)]
