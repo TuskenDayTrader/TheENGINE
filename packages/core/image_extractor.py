@@ -65,16 +65,19 @@ from .models import LevelsPayload
 # ---------------------------------------------------------------------------
 
 # Green #089981 → BGR(129, 153, 8) → HSV ≈ (85, 242, 153)
-_GREEN_LOWER: Tuple[int, int, int] = (60, 30, 30)
-_GREEN_UPPER: Tuple[int, int, int] = (95, 255, 255)
+# Range widened (H 50-100, S/V ≥ 20) to tolerate display-calibration shifts
+# and custom ORB indicator colours across the yellow-green→cyan-green spectrum.
+_GREEN_LOWER: Tuple[int, int, int] = (50, 20, 20)
+_GREEN_UPPER: Tuple[int, int, int] = (100, 255, 255)
 
 # BGR pixel value used for LAB-space second-pass detection
 _GREEN_BGR_TARGET: Tuple[int, int, int] = (129, 153, 8)
 
 # Red #f23645 → BGR(69, 54, 242) → HSV ≈ (178, 200, 242) and wraps near H=0
-_RED_LOWER_A: Tuple[int, int, int] = (0, 30, 40)
-_RED_UPPER_A: Tuple[int, int, int] = (20, 255, 255)
-_RED_LOWER_B: Tuple[int, int, int] = (155, 30, 40)
+# Ranges widened to H 0-25 / 150-180 and S/V ≥ 20/30 for the same reason.
+_RED_LOWER_A: Tuple[int, int, int] = (0, 20, 30)
+_RED_UPPER_A: Tuple[int, int, int] = (25, 255, 255)
+_RED_LOWER_B: Tuple[int, int, int] = (150, 20, 30)
 _RED_UPPER_B: Tuple[int, int, int] = (180, 255, 255)
 
 # BGR pixel value used for LAB-space second-pass detection
@@ -446,16 +449,31 @@ def _detect_horizontal_lines(
         processed = cv2.morphologyEx(closed, cv2.MORPH_OPEN, noise_kernel)
 
         # ── Session-box suppression ───────────────────────────────────────────
-        # Any connected component whose height exceeds box_threshold_h is treated
-        # as a filled overlay rectangle (e.g., a session box) and removed from
-        # the mask so Hough does not detect its top/bottom edges as price levels.
+        # Suppress tall blobs that are NOT predominantly horizontal.
+        # Pure candle bodies (narrow) and session overlay boxes (square-ish)
+        # are removed so Hough does not misclassify their edges as price levels.
+        #
+        # IMPORTANT: blobs that are both tall AND wide with a high
+        # width-to-height ratio are horizontal level lines that have been
+        # merged with a same-colour candlestick body (they share pixels where
+        # the candle crosses the level line).  Suppressing these entire blobs
+        # erases the level line itself from the mask.  We preserve them so
+        # that the Hough pass (Method B) can still detect the horizontal
+        # segment within the merged blob.
         cnts_box, _ = cv2.findContours(
             processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         for cnt in cnts_box:
-            _, _, _, ch_b = cv2.boundingRect(cnt)
+            _, _, cw_b, ch_b = cv2.boundingRect(cnt)
             if ch_b > box_threshold_h:
-                cv2.drawContours(processed, [cnt], -1, 0, thickness=-1)
+                # A merged "line + candle" blob spans the chart width and
+                # keeps a favourable width:height ratio.  Leave it intact.
+                is_line_like = (
+                    cw_b >= min_line_width
+                    and cw_b / ch_b >= _CONTOUR_MIN_ASPECT
+                )
+                if not is_line_like:
+                    cv2.drawContours(processed, [cnt], -1, 0, thickness=-1)
 
         # ── Right-edge exclusion ──────────────────────────────────────────────
         if detect_right < chart_w:
