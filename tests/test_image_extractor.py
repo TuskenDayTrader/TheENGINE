@@ -463,6 +463,78 @@ class TestChartROI:
 
 
 # ---------------------------------------------------------------------------
+# Candle-body suppression regression (real-world root-cause fix)
+# ---------------------------------------------------------------------------
+
+
+class TestCandleBodyMergedLines:
+    """
+    Lines of the same colour as a candlestick body merge into one connected
+    component in the colour mask.  The old box-suppression logic incorrectly
+    erased the entire component (including the level line) when the merged
+    blob's height exceeded ``box_threshold_h``, producing zero detections.
+
+    These tests verify that the fixed suppression preserves horizontally
+    dominant blobs so that the Hough pass can still recover the level line.
+    """
+
+    _GREEN = [129, 153, 8]   # TradingView #089981 BGR
+    _RED = [69, 54, 242]     # TradingView #f23645 BGR
+
+    @staticmethod
+    def _blank(h: int = 614, w: int = 1540) -> np.ndarray:
+        """Full-HD-ish image matching common TradingView screenshot dimensions."""
+        return np.zeros((h, w, 3), dtype=np.uint8)
+
+    def test_green_line_merged_with_candle_body_detected(self):
+        """A green level line that physically overlaps a green candle body is found."""
+        img = self._blank()
+        img[200, 80:1200] = self._GREEN          # horizontal level line
+        img[180:220, 390:410] = self._GREEN      # candle body crossing y=200
+        lines = _detect_horizontal_lines(img)
+        assert len(lines) > 0, (
+            "Green level line was erased by box suppression due to candle overlap"
+        )
+        y_vals = [y for y, _ in lines]
+        assert any(abs(y - 200) <= 10 for y in y_vals)
+
+    def test_red_line_merged_with_candle_body_detected(self):
+        """A red level line that physically overlaps a red candle body is found."""
+        img = self._blank()
+        img[300, 80:1200] = self._RED
+        img[280:320, 600:620] = self._RED
+        lines = _detect_horizontal_lines(img)
+        assert len(lines) > 0, (
+            "Red level line was erased by box suppression due to candle overlap"
+        )
+        y_vals = [y for y, _ in lines]
+        assert any(abs(y - 300) <= 10 for y in y_vals)
+
+    def test_multiple_lines_each_merged_with_candles_all_detected(self):
+        """Three green level lines each merged with multiple candle bodies are all found."""
+        img = self._blank()
+        for line_y in [150, 300, 450]:
+            img[line_y, 80:1200] = self._GREEN
+            for cx in [200, 450, 750, 1000]:
+                img[line_y - 15 : line_y + 16, cx : cx + 12] = self._GREEN
+        lines = _detect_horizontal_lines(img)
+        assert len(lines) >= 3, (
+            f"Expected ≥3 lines but got {len(lines)}; "
+            "candle bodies may be suppressing level lines"
+        )
+
+    def test_narrow_candle_body_alone_not_detected_as_line(self):
+        """A tall narrow candle body with NO horizontal line must NOT be reported."""
+        img = self._blank()
+        # Narrow candle body (12 px wide, 60 px tall) — no horizontal line
+        img[180:240, 400:412] = self._GREEN
+        lines = _detect_horizontal_lines(img)
+        assert lines == [], (
+            f"Standalone candle body should not be detected as a line; got {lines}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Debug output from _detect_horizontal_lines
 # ---------------------------------------------------------------------------
 
