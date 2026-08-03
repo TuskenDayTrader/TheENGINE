@@ -159,8 +159,15 @@ _MIN_AXIS_POINTS_FOR_SCALE: int = 3
 # The chart-label zone is in the right portion of the chart image, between
 # the plot area right edge and the numeric price axis strip.
 # These fractions define the x-range for label OCR (relative to full image width).
+# Right boundary extended to 0.93 so that far-right margin annotations
+# (e.g. "Asia High", "New York Low") placed near the price-axis edge are captured.
 _LABEL_ZONE_LEFT_FRACTION: float = 0.60   # start of label zone
-_LABEL_ZONE_RIGHT_FRACTION: float = 0.86  # end of label zone (just before price axis)
+_LABEL_ZONE_RIGHT_FRACTION: float = 0.93  # end of label zone (captures far-right labels)
+
+# Binary threshold used for label OCR.  Lowered from 140 to 100 so that
+# TradingView's dim/gray annotation text (value ~110-160) is also detected,
+# not only bright-white labels.
+_LABEL_BINARY_THRESHOLD: int = 100
 
 # Maximum y-pixel distance between a chart label and its nearest horizontal
 # line for the two to be associated.
@@ -169,6 +176,25 @@ _LABEL_LINE_MATCH_TOLERANCE_PX: int = 20
 # Session-info panel is in the bottom-right corner.
 _SESSION_PANEL_TOP_FRACTION: float = 0.82
 _SESSION_PANEL_LEFT_FRACTION: float = 0.72
+
+# ---------------------------------------------------------------------------
+# Mechanical outlier-rejection constants
+# ---------------------------------------------------------------------------
+
+# Tier-2: reject any mapped price whose distance from current_price exceeds
+# this multiple of the detected ATR.  A 5× ATR envelope is deliberately wide
+# to avoid rejecting genuine far-away structural levels while still catching
+# wild OCR mis-reads (e.g. 16 072 vs 28 072).
+_OUTLIER_ATR_ENVELOPE: float = 5.0
+
+# Tier-3: statistical IQR multiplier.  With a typical set of 4-10 chart
+# levels, 2.5× IQR is tight enough to reject isolated garbage values but
+# permissive enough to keep spread-out structural levels.
+_OUTLIER_IQR_MULTIPLIER: float = 2.5
+
+# Minimum number of non-outlier peer prices required before the IQR filter
+# is applied.  With fewer peers the IQR is unreliable.
+_OUTLIER_IQR_MIN_PEERS: int = 3
 
 # Canonical label → LevelsPayload field mapping.
 # Normalised label text (lowercase, stripped) → field name.
@@ -194,14 +220,19 @@ _LABEL_FIELD_MAP: Dict[str, str] = {
     # Globex session
     "globex high": "globex_high",
     "globex low": "globex_low",
+    "globex open": "globex_open",
     # Asian / Tokyo session
     "asia high": "asia_high",
     "asian high": "asia_high",
     "asia low": "asia_low",
     "asian low": "asia_low",
+    "asia open": "asia_open",
+    "asian open": "asia_open",
+    "tokyo open": "asia_open",
     # London session
     "london high": "london_high",
     "london low": "london_low",
+    "london open": "london_open",
     # New York session
     "new york high": "ny_high",
     "newyork high": "ny_high",
@@ -215,8 +246,20 @@ _LABEL_FIELD_MAP: Dict[str, str] = {
     # 4H references mapped to session equivalents where possible
     "prev 4h high": "ny_high",
     "prev 4h low": "ny_low",
-    # Week / month references (stored in custom slots if LevelsPayload grows)
-    # currently omitted — no matching field exists.
+    # Previous week — map to globex session slots (nearest equivalent)
+    "prev week high": "globex_high",
+    "previous week high": "globex_high",
+    "prior week high": "globex_high",
+    "prev week low": "globex_low",
+    "previous week low": "globex_low",
+    "prior week low": "globex_low",
+    # Previous month — map to pdh/pdl (broadest prior reference)
+    "prev month high": "pdh",
+    "previous month high": "pdh",
+    "prior month high": "pdh",
+    "prev month low": "pdl",
+    "previous month low": "pdl",
+    "prior month low": "pdl",
 }
 
 
@@ -289,6 +332,18 @@ class ExtractionResult:
 
     #: ATR value parsed from the session panel.  ``None`` when unavailable.
     detected_atr: Optional[float] = None
+
+    #: Lowest price label parsed from the price axis (bottom of visible range).
+    #: Used by the quality-gate axis-bounds check.
+    axis_price_min: Optional[float] = None
+
+    #: Highest price label parsed from the price axis (top of visible range).
+    #: Used by the quality-gate axis-bounds check.
+    axis_price_max: Optional[float] = None
+
+    #: Prices mechanically rejected by :func:`_filter_outlier_prices` together
+    #: with a short human-readable reason.  Empty when no outliers were found.
+    rejected_outliers: List[Tuple[float, str]] = field(default_factory=list)
 
     #: Optional diagnostic counters populated when ``debug=True`` is passed to
     #: :func:`extract_from_image`.  Keys: ``image_size``, ``chart_roi``,
@@ -816,8 +871,11 @@ def _extract_chart_labels(
     label_crop = img[:, label_x0:label_x1, :]
 
     gray = cv2.cvtColor(label_crop, cv2.COLOR_BGR2GRAY)
-    # White text on dark background → binary threshold
-    _, thresh = cv2.threshold(gray, 140, 255, cv2.THRESH_BINARY)
+    # TradingView renders annotations in white and dim-gray text on a dark
+    # background.  A threshold of 100 (vs the previous 140) ensures gray
+    # labels (e.g. "Prev Day Low / London Low") are binarised along with the
+    # bright-white ones.
+    _, thresh = cv2.threshold(gray, _LABEL_BINARY_THRESHOLD, 255, cv2.THRESH_BINARY)
 
     try:
         data = pytesseract.image_to_data(
@@ -994,6 +1052,114 @@ def _extract_session_info(
                 pass
 
     return session, atr_val
+
+
+def _filter_outlier_prices(
+    prices: List[float],
+    current_price: float,
+    atr: Optional[float],
+) -> Tuple[List[float], List[Tuple[float, str]]]:
+    """
+    Mechanically reject implausible prices using a 3-tier fact-finding approach.
+
+    This prevents wild OCR mis-reads (e.g. 16 072 when all other levels
+    cluster around 28 000) from contaminating the scoring payload.
+
+    Tier 1 — ATR envelope
+        Any price further than ``_OUTLIER_ATR_ENVELOPE × ATR`` from the
+        current price is rejected immediately.  This tier is only applied
+        when ATR is available.
+
+    Tier 2 — IQR statistical filter
+        With ≥ ``_OUTLIER_IQR_MIN_PEERS`` surviving prices, compute Q1/Q3
+        and reject any price outside
+        ``[Q1 - IQR × _OUTLIER_IQR_MULTIPLIER, Q3 + IQR × _OUTLIER_IQR_MULTIPLIER]``.
+
+    Tier 3 — Peer-vote isolation check
+        A price is rejected if it differs from every remaining peer by more
+        than 20 % of the current price.  This catches the case where a
+        single rogue value survives Tier 1 and Tier 2 but is clearly
+        disconnected from the cluster.
+
+    Parameters
+    ----------
+    prices:
+        Raw mapped prices from line detection (may include OCR garbage).
+    current_price:
+        Estimated last-bar close price used as the ATR anchor.
+    atr:
+        Detected ATR value; ``None`` skips the ATR-envelope tier.
+
+    Returns
+    -------
+    ``(clean_prices, rejected)`` where *rejected* is a list of
+    ``(price, reason)`` tuples documenting every removal.
+    """
+    if not prices:
+        return [], []
+
+    rejected_prices: Dict[float, str] = {}
+
+    # ── Tier 1: ATR envelope ──────────────────────────────────────────────────
+    if atr and atr > 0:
+        envelope = atr * _OUTLIER_ATR_ENVELOPE
+        for p in prices:
+            if p not in rejected_prices and abs(p - current_price) > envelope:
+                atr_ratio = abs(p - current_price) / atr
+                rejected_prices[p] = (
+                    f"ATR-envelope rejection: {p:.2f} is {atr_ratio:.1f}× ATR "
+                    f"({atr:.2f}) from current price {current_price:.2f} "
+                    f"(limit {_OUTLIER_ATR_ENVELOPE}× ATR = {envelope:.2f})"
+                )
+
+    surviving = [p for p in prices if p not in rejected_prices]
+
+    # ── Tier 2: IQR statistical filter ───────────────────────────────────────
+    if len(surviving) >= _OUTLIER_IQR_MIN_PEERS:
+        sorted_s = sorted(surviving)
+        n = len(sorted_s)
+        q1 = sorted_s[n // 4]
+        q3 = sorted_s[(3 * n) // 4]
+        iqr = q3 - q1
+        if iqr > 0:
+            lo = q1 - _OUTLIER_IQR_MULTIPLIER * iqr
+            hi = q3 + _OUTLIER_IQR_MULTIPLIER * iqr
+            for p in surviving[:]:
+                if p not in rejected_prices and not (lo <= p <= hi):
+                    rejected_prices[p] = (
+                        f"IQR-outlier rejection: {p:.2f} falls outside "
+                        f"[{lo:.2f}, {hi:.2f}] "
+                        f"(Q1={q1:.2f} Q3={q3:.2f} IQR={iqr:.2f} "
+                        f"multiplier={_OUTLIER_IQR_MULTIPLIER})"
+                    )
+
+    surviving = [p for p in prices if p not in rejected_prices]
+
+    # ── Tier 3: peer-vote isolation check ────────────────────────────────────
+    isolation_threshold = current_price * 0.20
+    if len(surviving) >= 2:
+        for p in surviving[:]:
+            if p in rejected_prices:
+                continue
+            peers = [q for q in surviving if q != p and q not in rejected_prices]
+            if peers and all(abs(p - q) > isolation_threshold for q in peers):
+                rejected_prices[p] = (
+                    f"Isolation rejection: {p:.2f} differs from every peer "
+                    f"by >{isolation_threshold:.2f} (20 % of current price "
+                    f"{current_price:.2f})"
+                )
+
+    clean = [p for p in prices if p not in rejected_prices]
+    rejected_list: List[Tuple[float, str]] = [
+        (p, reason) for p, reason in rejected_prices.items()
+    ]
+    if rejected_list:
+        logger.info(
+            "Outlier filter removed %d price(s): %s",
+            len(rejected_list),
+            [(round(p, 2), r[:60]) for p, r in rejected_list],
+        )
+    return clean, rejected_list
 
 
 def _build_levels_payload(
@@ -1313,6 +1479,14 @@ def extract_from_image(
     except Exception as exc:
         logger.debug("Session info extraction failed for ticker=%s: %s", ticker, exc)
 
+    # Step 3d: Extract axis price bounds for quality-gate axis-bounds check ───
+    axis_price_min: Optional[float] = None
+    axis_price_max: Optional[float] = None
+    if axis_points:
+        axis_prices = [p for _, p in axis_points]
+        axis_price_min = round(min(axis_prices), 4)
+        axis_price_max = round(max(axis_prices), 4)
+
     # Step 4: Estimate current price ──────────────────────────────────────────
     current_price, cp_from_axis = _estimate_current_price(img, axis_points, line_prices)
 
@@ -1320,6 +1494,53 @@ def extract_from_image(
     if current_price is None and "prior_settle" in labeled_levels:
         current_price = labeled_levels["prior_settle"]
         cp_from_axis = False
+
+    # Step 4b: Mechanical outlier rejection ───────────────────────────────────
+    # Run the 3-tier filter on line_prices and on labeled_levels prices alike.
+    # Use the detected ATR (from the session panel) as the primary envelope
+    # anchor; fall back to the ATR stored in labeled_levels if the panel OCR
+    # was unavailable.
+    rejected_outliers: List[Tuple[float, str]] = []
+    if current_price is not None and (line_prices or labeled_levels):
+        # Resolve the best ATR estimate available at this stage
+        atr_for_filter: Optional[float] = detected_atr
+        if atr_for_filter is None:
+            atr_for_filter = labeled_levels.get("atr14")
+
+        # Filter unlabeled line prices
+        if line_prices:
+            line_prices, line_rejected = _filter_outlier_prices(
+                line_prices, current_price, atr_for_filter
+            )
+            rejected_outliers.extend(line_rejected)
+
+        # Filter labeled level prices (skip non-price keys like atr14)
+        if labeled_levels:
+            _skip_keys = {"atr14"}
+            _labeled_prices = {
+                k: v for k, v in labeled_levels.items()
+                if k not in _skip_keys and v is not None
+            }
+            _all_labeled = list(_labeled_prices.values())
+            _clean_labeled, _labeled_rejected = _filter_outlier_prices(
+                _all_labeled, current_price, atr_for_filter
+            )
+            rejected_outliers.extend(_labeled_rejected)
+            # Remove rejected prices from labeled_levels
+            _rejected_set = {p for p, _ in _labeled_rejected}
+            if _rejected_set:
+                labeled_levels = {
+                    k: v for k, v in labeled_levels.items()
+                    if k in _skip_keys or v not in _rejected_set
+                }
+
+        if rejected_outliers:
+            logger.warning(
+                "ticker=%s: mechanical outlier filter rejected %d value(s) — %s",
+                ticker,
+                len(rejected_outliers),
+                [(round(p, 2), r.split(":")[0]) for p, r in rejected_outliers],
+            )
 
     # Step 5: Compute confidence ──────────────────────────────────────────────
     # Bonus: label-matched levels improve confidence
@@ -1352,7 +1573,7 @@ def extract_from_image(
 
     logger.info(
         "Extraction complete: ticker=%s axis_points=%d lines=%d "
-        "mapped=%d labels=%d session=%s confidence=%.2f",
+        "mapped=%d labels=%d session=%s confidence=%.2f outliers_rejected=%d",
         ticker,
         len(axis_points),
         len(lines),
@@ -1360,6 +1581,7 @@ def extract_from_image(
         len(labeled_levels),
         detected_session or "unknown",
         confidence,
+        len(rejected_outliers),
     )
 
     return ExtractionResult(
@@ -1373,5 +1595,8 @@ def extract_from_image(
         labeled_levels=labeled_levels,
         detected_session=detected_session,
         detected_atr=detected_atr,
+        axis_price_min=axis_price_min,
+        axis_price_max=axis_price_max,
+        rejected_outliers=rejected_outliers,
         debug_info=_debug_info,
     )

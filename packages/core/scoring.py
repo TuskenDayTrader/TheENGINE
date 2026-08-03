@@ -113,6 +113,10 @@ _SOURCE_SESSION: Dict[str, str] = {
     "london_ib_low": "london",
     "ny_ib_high": "ny",
     "ny_ib_low": "ny",
+    # Session opening prices
+    "globex_open": "globex",
+    "asia_open": "asia",
+    "london_open": "london",
 }
 
 

@@ -110,6 +110,7 @@ class AnalyzeImageResponse(BaseModel):
     debug_info: dict | None = None
     labeled_levels: dict | None = None
     detected_session: str | None = None
+    rejected_outliers: list[dict] | None = None
 
 
 class HistoryEntryResponse(BaseModel):
@@ -387,6 +388,8 @@ async def analyze_image(
                 ticker=ticker or "UNKNOWN",
                 level_prices=_level_prices,
                 current_price=extraction.current_price,
+                axis_min=extraction.axis_price_min,
+                axis_max=extraction.axis_price_max,
             )
             if not qg.passed:
                 extraction.warning = (
@@ -470,6 +473,10 @@ async def analyze_image(
         debug_info=extraction.debug_info if debug else None,
         labeled_levels=extraction.labeled_levels if extraction.labeled_levels else None,
         detected_session=extraction.detected_session,
+        rejected_outliers=(
+            [{"price": round(p, 4), "reason": r} for p, r in extraction.rejected_outliers]
+            if extraction.rejected_outliers else None
+        ),
     )
 
 
