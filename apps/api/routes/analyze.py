@@ -111,6 +111,7 @@ class AnalyzeImageResponse(BaseModel):
     labeled_levels: dict | None = None
     detected_session: str | None = None
     rejected_outliers: list[dict] | None = None
+    interior_confluence_zones: list[dict] | None = None
 
 
 class HistoryEntryResponse(BaseModel):
@@ -476,6 +477,9 @@ async def analyze_image(
         rejected_outliers=(
             [{"price": round(p, 4), "reason": r} for p, r in extraction.rejected_outliers]
             if extraction.rejected_outliers else None
+        ),
+        interior_confluence_zones=(
+            extraction.interior_confluence_zones if extraction.interior_confluence_zones else None
         ),
     )
 
