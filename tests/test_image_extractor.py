@@ -562,3 +562,91 @@ class TestDetectLinesDebugOut:
         img = self._green_image()
         lines = _detect_horizontal_lines(img)
         assert len(lines) > 0
+
+
+# ---------------------------------------------------------------------------
+# _filter_outlier_prices — mechanical outlier rejection
+# ---------------------------------------------------------------------------
+
+
+from packages.core.image_extractor import _filter_outlier_prices
+
+
+class TestFilterOutlierPrices:
+    """Verify the 3-tier mechanical outlier rejection."""
+
+    # A realistic NQ cluster around 28_000
+    _NQ_CLUSTER = [27_900.0, 28_000.0, 28_100.0, 28_200.0, 28_300.0]
+    _NQ_CURRENT = 28_000.0
+    _NQ_ATR = 110.0  # ~realistic daily ATR for NQ
+
+    def test_no_outliers_unchanged(self):
+        clean, rejected = _filter_outlier_prices(
+            self._NQ_CLUSTER, self._NQ_CURRENT, self._NQ_ATR
+        )
+        assert rejected == []
+        assert set(clean) == set(self._NQ_CLUSTER)
+
+    def test_atr_envelope_rejects_distant_price(self):
+        """16 072 is ~110 ATR units away — must be rejected by Tier 1."""
+        prices = self._NQ_CLUSTER + [16_072.0]
+        clean, rejected = _filter_outlier_prices(prices, self._NQ_CURRENT, self._NQ_ATR)
+        rejected_prices = {p for p, _ in rejected}
+        assert 16_072.0 in rejected_prices, "16 072 should be rejected by ATR envelope"
+        assert 16_072.0 not in clean
+
+    def test_iqr_rejects_moderate_outlier_when_no_atr(self):
+        """Without ATR, IQR tier still catches values far from the cluster."""
+        # Inject a value 3× the cluster spread away from the median
+        prices = [28_000.0, 28_100.0, 28_200.0, 28_300.0, 32_000.0]
+        clean, rejected = _filter_outlier_prices(prices, 28_200.0, atr=None)
+        rejected_prices = {p for p, _ in rejected}
+        assert 32_000.0 in rejected_prices, "32 000 should be rejected by IQR filter"
+
+    def test_peer_vote_isolation_rejects_singleton(self):
+        """A lone value 25 % below current with no peers should be rejected."""
+        # Cluster at 28_000; rogue value at 20_000 (28 % below current)
+        prices = [28_000.0, 28_100.0, 28_200.0, 20_000.0]
+        clean, rejected = _filter_outlier_prices(prices, 28_100.0, atr=None)
+        rejected_prices = {p for p, _ in rejected}
+        assert 20_000.0 in rejected_prices
+
+    def test_empty_prices_returns_empty(self):
+        clean, rejected = _filter_outlier_prices([], 28_000.0, 110.0)
+        assert clean == []
+        assert rejected == []
+
+    def test_single_price_no_rejection(self):
+        """A single price cannot be statistically rejected — return unchanged."""
+        clean, rejected = _filter_outlier_prices([28_000.0], 28_000.0, 110.0)
+        assert clean == [28_000.0]
+        assert rejected == []
+
+    def test_two_prices_atr_filter_still_runs(self):
+        """With only 2 prices, the ATR tier should still fire for the outlier."""
+        prices = [28_000.0, 5_000.0]
+        clean, rejected = _filter_outlier_prices(prices, 28_000.0, 110.0)
+        rejected_prices = {p for p, _ in rejected}
+        assert 5_000.0 in rejected_prices
+
+    def test_rejection_reason_contains_useful_text(self):
+        """Rejection reason must contain diagnostic information."""
+        prices = self._NQ_CLUSTER + [16_072.0]
+        _, rejected = _filter_outlier_prices(prices, self._NQ_CURRENT, self._NQ_ATR)
+        reasons = [r for _, r in rejected if abs(_ - 16_072.0) < 1]
+        # Find the 16_072 rejection
+        matching = [(p, r) for p, r in rejected if abs(p - 16_072.0) < 1]
+        assert matching, "16 072 should appear in rejected list"
+        _, reason = matching[0]
+        assert "16072" in reason or "16" in reason  # price should be in reason
+
+    def test_valid_far_support_not_rejected_when_atr_large(self):
+        """A genuinely distant structural low should survive when ATR is large enough."""
+        # ATR = 3 000 means ±15 000 envelope; 26 000 is within that range
+        prices = [28_000.0, 28_200.0, 26_000.0]
+        clean, rejected = _filter_outlier_prices(prices, 28_000.0, atr=3_000.0)
+        # 26_000 is within 5× ATR of 28_000, so should not be rejected by Tier 1
+        rejected_prices = {p for p, _ in rejected}
+        assert 26_000.0 not in rejected_prices, (
+            "26 000 is within 5× ATR envelope and should not be rejected"
+        )

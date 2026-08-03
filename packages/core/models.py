@@ -78,6 +78,11 @@ class LevelsPayload:
     ny_ib_high: Optional[float] = None
     ny_ib_low: Optional[float] = None
 
+    # Session opening prices (each opens act as a structural reference level)
+    globex_open: Optional[float] = None
+    asia_open: Optional[float] = None
+    london_open: Optional[float] = None
+
     atr14: Optional[float] = None
 
 
