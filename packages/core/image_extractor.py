@@ -7,7 +7,7 @@ suitable for the scoring engine.
 
 Public API
 ----------
-- ``extract_from_image(image_bytes, ...)`` – main entry point.
+- ``extract_from_image(image_bytes_or_path, ...)`` – main entry point; accepts raw bytes or a file-system path string.
 - ``ExtractionResult`` – structured output dataclass.
 
 Internal helpers (exported for unit testing)
@@ -1544,7 +1544,7 @@ def _estimate_current_price(
 
 
 def extract_from_image(
-    image_bytes: bytes,
+    image_bytes: "bytes | str",
     ticker: str = "UNKNOWN",
     date_et: Optional[str] = None,
     timeframe: str = "30m",
@@ -1557,7 +1557,10 @@ def extract_from_image(
     Parameters
     ----------
     image_bytes:
-        Raw bytes of a PNG, JPEG, or WebP file.
+        Either the raw bytes of a PNG, JPEG, or WebP file **or** a file-system
+        path (``str``) pointing to such a file.  When a string is supplied
+        ``cv2.imread`` is used to load the image; when bytes are supplied
+        ``cv2.imdecode`` is used.
     ticker:
         Ticker symbol (used only for logging).
     date_et, timeframe, lookback_days:
@@ -1583,8 +1586,18 @@ def extract_from_image(
 
     # Decode image ────────────────────────────────────────────────────────────
     try:
-        arr = np.frombuffer(image_bytes, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if isinstance(image_bytes, str):
+            img = cv2.imread(image_bytes, cv2.IMREAD_COLOR)
+            if img is None:
+                logger.warning(
+                    "cv2.imread returned None for ticker=%s (file not found or unreadable: %s)",
+                    ticker,
+                    image_bytes,
+                )
+                return ExtractionResult()
+        else:
+            arr = np.frombuffer(image_bytes, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception as exc:
         logger.warning("Image decode error for ticker=%s: %s", ticker, exc)
         return ExtractionResult()
