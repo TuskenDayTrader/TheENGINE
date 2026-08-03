@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import logging
 import uuid
 from enum import Enum
+from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from packages.core.data_store import AnalysisRecord, ExtractionRecord, get_store
 from packages.core.image_extractor import ExtractionResult, extract_from_image
+from packages.core.insight_engine import find_confluence_zones, generate_ticker_report
 from packages.core.models import ActionState, AnalysisPayload, AnalysisResult, ConvictionTag, LevelDecision, LevelsPayload
 from packages.core.output import build_poster
 from packages.core.policy import ExtractionQualityResult, PolicyDecision, check_extraction_quality_gates, enforce_scalper_policy
@@ -104,6 +108,51 @@ class AnalyzeImageResponse(BaseModel):
     extraction_warning: str | None = None
     analysis: AnalyzeResponse | None = None
     debug_info: dict | None = None
+    labeled_levels: dict | None = None
+    detected_session: str | None = None
+
+
+class HistoryEntryResponse(BaseModel):
+    id: int
+    created_at: str
+    ticker: str
+    date_et: str | None
+    session: str | None
+    filename: str | None
+    confidence: float
+    current_price: float | None
+    quality_passed: bool
+    action_state: str | None
+    analysis_confidence: float | None
+    labeled_levels: dict | None
+    warning: str | None
+
+
+class HistoryResponse(BaseModel):
+    ticker: str
+    entries: list[HistoryEntryResponse]
+    total: int
+
+
+class ConfluenceZoneResponse(BaseModel):
+    price: float
+    hit_count: int
+    fields: list[str]
+    last_seen: str | None
+    confluence: bool
+
+
+class InsightsResponse(BaseModel):
+    ticker: str
+    generated_at: str
+    total_extractions: int
+    quality_gate_pass_rate: float
+    avg_confidence: float
+    avg_labeled_levels: float
+    common_sessions: list[str]
+    recurring_levels: list[ConfluenceZoneResponse]
+    gap_analysis: list[str]
+    suggested_improvements: list[str]
 
 
 def _confidence_to_float(tag: ConvictionTag) -> float:
@@ -112,6 +161,70 @@ def _confidence_to_float(tag: ConvictionTag) -> float:
     if tag == ConvictionTag.MODERATE:
         return 0.6
     return 0.3
+
+
+def _persist_extraction(
+    extraction: ExtractionResult,
+    ticker: str,
+    date_et: str | None,
+    timeframe: str | None,
+    filename: str | None,
+    quality_passed: bool,
+) -> int:
+    """Record an extraction event in the persistent store and return its row id."""
+    levels_dict: dict[str, Any] | None = None
+    if extraction.levels_payload is not None:
+        try:
+            levels_dict = dataclasses.asdict(extraction.levels_payload)
+        except Exception:
+            pass
+    try:
+        rec = ExtractionRecord(
+            ticker=ticker,
+            date_et=date_et,
+            timeframe=timeframe,
+            filename=filename,
+            session=extraction.detected_session,
+            num_lines=extraction.num_lines_detected,
+            num_axis_points=extraction.num_axis_points,
+            confidence=extraction.extraction_confidence,
+            current_price=extraction.current_price,
+            atr=extraction.detected_atr,
+            labeled_levels=extraction.labeled_levels,
+            levels_json=levels_dict,
+            warning=extraction.warning,
+            quality_passed=quality_passed,
+        )
+        return get_store().record_extraction(rec)
+    except Exception as exc:
+        logger.warning("Failed to persist extraction for ticker=%s: %s", ticker, exc)
+        return 0
+
+
+def _persist_analysis(
+    analysis_resp: AnalyzeResponse,
+    ticker: str,
+    date_et: str | None,
+    session: str | None,
+    extraction_id: int,
+) -> None:
+    """Record an analysis result in the persistent store."""
+    try:
+        rec = AnalysisRecord(
+            ticker=ticker,
+            date_et=date_et,
+            session=session,
+            action_state=analysis_resp.action_state,
+            confidence=analysis_resp.confidence,
+            strongest_res=[lvl.price for lvl in analysis_resp.strongest_resistance],
+            strongest_sup=[lvl.price for lvl in analysis_resp.strongest_support],
+            policy_json=analysis_resp.policy,
+            poster_text=analysis_resp.poster_text,
+            extraction_id=extraction_id,
+        )
+        get_store().record_analysis(rec, extraction_id=extraction_id)
+    except Exception as exc:
+        logger.warning("Failed to persist analysis for ticker=%s: %s", ticker, exc)
 
 
 def _levels_to_price_list(payload: LevelsPayload) -> list[float]:
@@ -325,6 +438,27 @@ async def analyze_image(
             )
             extraction.warning = f"Analysis failed (error {error_id})"
 
+    # Persist extraction and analysis to the living data store
+    _t = ticker or "UNKNOWN"
+    _d = date_et or dt.date.today().isoformat()
+    quality_passed = analysis is not None
+    extraction_id = _persist_extraction(
+        extraction=extraction,
+        ticker=_t,
+        date_et=_d,
+        timeframe=timeframe,
+        filename=file.filename,
+        quality_passed=quality_passed,
+    )
+    if analysis is not None:
+        _persist_analysis(
+            analysis_resp=analysis,
+            ticker=_t,
+            date_et=_d,
+            session=extraction.detected_session,
+            extraction_id=extraction_id,
+        )
+
     return AnalyzeImageResponse(
         filename=file.filename or "",
         content_type=content_type,
@@ -334,6 +468,8 @@ async def analyze_image(
         extraction_warning=extraction.warning,
         analysis=analysis,
         debug_info=extraction.debug_info if debug else None,
+        labeled_levels=extraction.labeled_levels if extraction.labeled_levels else None,
+        detected_session=extraction.detected_session,
     )
 
 
@@ -410,3 +546,100 @@ async def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             detail=f"An internal error occurred during analysis. Please try again. Ref: {error_id}",
         )
     return _map_response(result, payload.current_price, payload.levels.atr14, policy_decision)
+
+
+@router.get("/history", response_model=HistoryResponse)
+async def get_history(
+    ticker: str = Query(..., description="Ticker symbol (e.g. NQ, ES)"),
+    date_et: str | None = Query(default=None, description="Filter by date (YYYY-MM-DD)"),
+    limit: int = Query(default=50, ge=1, le=500, description="Max number of records"),
+) -> HistoryResponse:
+    """
+    Retrieve the upload and analysis history for a ticker.
+
+    Returns the most recent *limit* extraction events along with any
+    associated analysis results, ordered newest-first.  This powers the
+    "living memory" of the engine — every upload is stored and recallable.
+    """
+    try:
+        rows = get_store().get_history(ticker=ticker.upper(), limit=limit, date_et=date_et)
+    except Exception as exc:
+        logger.exception("History query failed for ticker=%s: %s", ticker, exc)
+        raise HTTPException(status_code=500, detail="Failed to retrieve history.")
+
+    entries: list[HistoryEntryResponse] = []
+    for r in rows:
+        try:
+            ll = r.get("labeled_levels")
+            if isinstance(ll, str):
+                import json as _json
+                ll = _json.loads(ll) if ll else {}
+        except Exception:
+            ll = {}
+        entries.append(
+            HistoryEntryResponse(
+                id=r["id"],
+                created_at=r["created_at"],
+                ticker=r["ticker"],
+                date_et=r.get("date_et"),
+                session=r.get("session"),
+                filename=r.get("filename"),
+                confidence=r.get("confidence", 0.0),
+                current_price=r.get("current_price"),
+                quality_passed=bool(r.get("quality_passed", 0)),
+                action_state=r.get("action_state"),
+                analysis_confidence=r.get("analysis_confidence"),
+                labeled_levels=ll or None,
+                warning=r.get("warning"),
+            )
+        )
+
+    return HistoryResponse(ticker=ticker.upper(), entries=entries, total=len(entries))
+
+
+@router.get("/insights", response_model=InsightsResponse)
+async def get_insights(
+    ticker: str = Query(..., description="Ticker symbol (e.g. NQ, ES)"),
+    lookback: int = Query(default=100, ge=10, le=1000, description="Number of past extractions to analyse"),
+) -> InsightsResponse:
+    """
+    Generate self-improvement insights for a ticker.
+
+    Analyses stored extraction history to surface:
+    - Quality gate pass rate and average confidence
+    - Recurring price zones (structural memory / confluence)
+    - Fields that are frequently missing (gap analysis)
+    - Actionable suggestions to improve extraction accuracy
+
+    This endpoint makes the engine "think about itself" — identifying its own
+    weak spots and telling you how to feed it better data.
+    """
+    try:
+        report = generate_ticker_report(ticker=ticker.upper(), lookback=lookback)
+    except Exception as exc:
+        logger.exception("Insights generation failed for ticker=%s: %s", ticker, exc)
+        raise HTTPException(status_code=500, detail="Failed to generate insights.")
+
+    zones = [
+        ConfluenceZoneResponse(
+            price=z["price"],
+            hit_count=z["hit_count"],
+            fields=z["fields"],
+            last_seen=z.get("last_seen"),
+            confluence=z.get("confluence", False),
+        )
+        for z in (report.recurring_levels or [])
+    ]
+
+    return InsightsResponse(
+        ticker=report.ticker,
+        generated_at=report.generated_at,
+        total_extractions=report.total_extractions,
+        quality_gate_pass_rate=report.quality_gate_pass_rate,
+        avg_confidence=report.avg_confidence,
+        avg_labeled_levels=report.avg_labeled_levels,
+        common_sessions=report.common_sessions,
+        recurring_levels=zones,
+        gap_analysis=report.gap_analysis,
+        suggested_improvements=report.suggested_improvements,
+    )
