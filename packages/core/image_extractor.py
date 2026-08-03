@@ -162,7 +162,7 @@ _MIN_AXIS_POINTS_FOR_SCALE: int = 3
 # Right boundary extended to 0.93 so that far-right margin annotations
 # (e.g. "Asia High", "New York Low") placed near the price-axis edge are captured.
 _LABEL_ZONE_LEFT_FRACTION: float = 0.60   # start of label zone
-_LABEL_ZONE_RIGHT_FRACTION: float = 0.93  # end of label zone (captures far-right labels)
+_LABEL_ZONE_RIGHT_FRACTION: float = 0.96  # end of label zone (extended to capture near-axis labels)
 
 # Binary threshold used for label OCR.  Lowered from 140 to 100 so that
 # TradingView's dim/gray annotation text (value ~110-160) is also detected,
@@ -171,7 +171,19 @@ _LABEL_BINARY_THRESHOLD: int = 100
 
 # Maximum y-pixel distance between a chart label and its nearest horizontal
 # line for the two to be associated.
-_LABEL_LINE_MATCH_TOLERANCE_PX: int = 20
+_LABEL_LINE_MATCH_TOLERANCE_PX: int = 30
+
+# Pixel tolerance used exclusively for grouping OCR tokens into SAME-ROW
+# phrases.  Must be smaller than the typical vertical gap between adjacent
+# label rows (~15-20 px on a 1080p TradingView chart) so that densely-stacked
+# labels (e.g. "Asia High", "Asia Low", "London Open" within 50 px) are NOT
+# merged into a single unrecognisable phrase.
+_LABEL_TOKEN_GROUP_TOL_PX: int = 8
+
+# Radius (in price points) used to cluster detected line prices into
+# interior confluence zones.  20 pts covers typical NQ tick noise; scales
+# with ATR when available.
+_CONFLUENCE_ZONE_RADIUS_PTS: float = 20.0
 
 # Session-info panel is in the bottom-right corner.
 _SESSION_PANEL_TOP_FRACTION: float = 0.82
@@ -290,6 +302,42 @@ def _label_to_field(raw_label: str) -> Optional[str]:
     return None
 
 
+def _label_to_fields(raw_label: str) -> List[str]:
+    """
+    Map a raw OCR label string to ALL matching ``LevelsPayload`` field names.
+
+    Unlike :func:`_label_to_field` which returns only the first match,
+    this function returns every field that appears in a compound label
+    separated by ``/``.  For example, "Prev Day High / London High" yields
+    ``["pdh", "london_high"]``, allowing both fields to be populated from a
+    single detected line — which is the correct interpretation when two session
+    reference levels share the same price.
+
+    Returns an empty list when no mapping is found.
+    """
+    normalised = _normalise_label(raw_label)
+    fields: List[str] = []
+    seen: set = set()
+
+    # Try the full label first (some compound phrases have their own direct entry)
+    f = _LABEL_FIELD_MAP.get(normalised)
+    if f and f not in seen:
+        fields.append(f)
+        seen.add(f)
+
+    # Walk each "/" segment for additional matches
+    for part in normalised.split("/"):
+        part = part.strip()
+        if not part:
+            continue
+        f = _LABEL_FIELD_MAP.get(part)
+        if f and f not in seen:
+            fields.append(f)
+            seen.add(f)
+
+    return fields
+
+
 # ---------------------------------------------------------------------------
 # Public data model
 # ---------------------------------------------------------------------------
@@ -344,6 +392,14 @@ class ExtractionResult:
     #: Prices mechanically rejected by :func:`_filter_outlier_prices` together
     #: with a short human-readable reason.  Empty when no outliers were found.
     rejected_outliers: List[Tuple[float, str]] = field(default_factory=list)
+
+    #: Interior confluence zones: clusters of 2+ detected line prices that
+    #: converge within :data:`_CONFLUENCE_ZONE_RADIUS_PTS` of each other.
+    #: Each entry is a dict with keys ``price`` (float, representative price),
+    #: ``count`` (int, number of lines in the cluster), ``lines`` (list of
+    #: individual prices), and ``strength`` ("strong" ≥3, "moderate" ≥2,
+    #: "weak" = 1).  Sorted by count descending then price descending.
+    interior_confluence_zones: List[dict] = field(default_factory=list)
 
     #: Optional diagnostic counters populated when ``debug=True`` is passed to
     #: :func:`extract_from_image`.  Keys: ``image_size``, ``chart_roi``,
@@ -917,9 +973,14 @@ def _match_labels_to_lines(
 
     Strategy
     --------
-    1. Group nearby label tokens (within ``tol`` px) into phrases.
-    2. For each phrase, resolve it to a ``LevelsPayload`` field via
-       :func:`_label_to_field`.
+    1. Group nearby label tokens (within ``_LABEL_TOKEN_GROUP_TOL_PX`` px)
+       into same-row phrases.  This tighter grouping keeps densely-stacked
+       labels (e.g. "Asia High", "Asia Low", "London Open" spaced ~15 px
+       apart) as separate phrases rather than merging them into a single
+       unrecognisable string.
+    2. For each phrase, resolve it to one or more ``LevelsPayload`` fields
+       via :func:`_label_to_fields`.  Compound labels (e.g. "Prev Day High
+       / London High") map to ALL matching fields simultaneously.
     3. Find the nearest horizontal line within ``tol`` pixels.
     4. Map that line's y-coordinate to a price via :func:`_map_y_to_price`.
 
@@ -932,8 +993,8 @@ def _match_labels_to_lines(
     axis_points:
         Calibrated price axis for price mapping.
     tol:
-        Maximum pixel gap for grouping tokens into phrases AND for
-        matching a phrase to its nearest line.
+        Maximum pixel gap for matching a phrase y-position to its nearest
+        detected horizontal line.
 
     Returns
     -------
@@ -942,14 +1003,15 @@ def _match_labels_to_lines(
     if not label_tokens or not lines or len(axis_points) < 2:
         return {}
 
-    # ── Step 1: group nearby tokens into phrases ──────────────────────────────
-    # Tokens within tol px vertically are on the same label row; concatenate
-    # their text in x-order (approximate by token order from Tesseract).
+    # ── Step 1: group nearby tokens into same-row phrases ─────────────────────
+    # Use a tight per-row tolerance so adjacent label rows do NOT merge.
+    # _LABEL_TOKEN_GROUP_TOL_PX (8 px) << typical row gap (15-20 px), which
+    # prevents 5 stacked labels from becoming one long unrecognisable string.
     sorted_tokens = sorted(label_tokens, key=lambda t: t[0])
     phrases: List[Tuple[int, str]] = []  # (median_y, full_phrase)
     group: List[Tuple[int, str]] = [sorted_tokens[0]]
     for token in sorted_tokens[1:]:
-        if token[0] - group[-1][0] <= tol:
+        if token[0] - group[-1][0] <= _LABEL_TOKEN_GROUP_TOL_PX:
             group.append(token)
         else:
             median_y = sorted(g[0] for g in group)[len(group) // 2]
@@ -961,13 +1023,13 @@ def _match_labels_to_lines(
         phrase = " ".join(t[1] for t in group)
         phrases.append((median_y, phrase))
 
-    # ── Step 2 & 3: resolve each phrase to a field and nearest line ───────────
+    # ── Step 2 & 3: resolve each phrase to ALL fields and nearest line ─────────
     labeled: Dict[str, float] = {}
     line_ys = [y for y, _ in lines]
 
     for phrase_y, phrase_text in phrases:
-        field = _label_to_field(phrase_text)
-        if field is None:
+        fields = _label_to_fields(phrase_text)
+        if not fields:
             continue
 
         # Find nearest detected line
@@ -975,20 +1037,16 @@ def _match_labels_to_lines(
             continue
         nearest_y = min(line_ys, key=lambda ly: abs(ly - phrase_y))
         if abs(nearest_y - phrase_y) > tol * 3:
-            # No line close enough — try mapping directly from the phrase y
+            # No line close enough — map directly from the label's y position
             nearest_y = phrase_y
 
         price = _map_y_to_price(nearest_y, axis_points)
         if price is None or price <= 0:
             continue
 
-        # Only overwrite a field if this match is closer to its line
-        if field not in labeled:
-            labeled[field] = round(price, 4)
-        else:
-            # Keep whichever was matched with a closer line distance
-            existing_y = min(line_ys, key=lambda ly: abs(ly - phrase_y))
-            if abs(nearest_y - phrase_y) < abs(existing_y - phrase_y):
+        # Assign ALL matched fields for this phrase (compound label support)
+        for field in fields:
+            if field not in labeled:
                 labeled[field] = round(price, 4)
 
     return labeled
@@ -1052,6 +1110,129 @@ def _extract_session_info(
                 pass
 
     return session, atr_val
+
+
+def _assign_interior_lines_to_ib_slots(
+    unlabeled_prices: List[float],
+    labeled: Dict[str, float],
+) -> Dict[str, float]:
+    """
+    Assign unlabeled line prices that fall inside known session boundaries
+    to Initial Balance (IB) slots in the ``LevelsPayload``.
+
+    For each session where both a HIGH and LOW are already labeled, any
+    unlabeled price within that range is classified relative to the session
+    midpoint:
+
+    * Below midpoint → candidate for ``{session}_ib_low``
+    * Above midpoint → candidate for ``{session}_ib_high``
+
+    The line closest to the midpoint from each side is chosen so that the
+    IB slots represent the first meaningful reference inside the session
+    range rather than the session extremes themselves.
+
+    Only fills slots not already present in *labeled*, preventing
+    authoritative label matches from being overwritten.
+
+    Parameters
+    ----------
+    unlabeled_prices:
+        Line prices that have NOT been matched to any label.
+    labeled:
+        Field-to-price mapping from authoritative label detection.
+
+    Returns
+    -------
+    New field-to-price entries to merge into *labeled*.
+    """
+    new_slots: Dict[str, float] = {}
+    session_pairs = [
+        ("asia_low",   "asia_high",   "asia_ib_low",   "asia_ib_high"),
+        ("london_low", "london_high", "london_ib_low", "london_ib_high"),
+        ("ny_low",     "ny_high",     "ny_ib_low",     "ny_ib_high"),
+    ]
+
+    for low_key, high_key, ib_low_key, ib_high_key in session_pairs:
+        sess_low = labeled.get(low_key)
+        sess_high = labeled.get(high_key)
+        if sess_low is None or sess_high is None or sess_low >= sess_high:
+            continue
+
+        midpoint = (sess_low + sess_high) / 2.0
+        interior = [p for p in unlabeled_prices if sess_low < p < sess_high]
+
+        if not interior:
+            continue
+
+        # Prefer the line closest to the midpoint from each side
+        below_mid = sorted(p for p in interior if p <= midpoint)
+        above_mid = sorted((p for p in interior if p > midpoint), reverse=True)
+
+        if below_mid and ib_low_key not in labeled and ib_low_key not in new_slots:
+            new_slots[ib_low_key] = round(below_mid[-1], 4)
+
+        if above_mid and ib_high_key not in labeled and ib_high_key not in new_slots:
+            new_slots[ib_high_key] = round(above_mid[-1], 4)
+
+    return new_slots
+
+
+def _compute_interior_confluence_zones(
+    all_prices: List[float],
+    cluster_radius: float = _CONFLUENCE_ZONE_RADIUS_PTS,
+) -> List[dict]:
+    """
+    Detect price clusters from all extracted line prices (labeled + unlabeled).
+
+    Lines whose prices fall within *cluster_radius* of each other are grouped
+    into a single confluence zone.  Zones with more lines are stronger and
+    represent higher-conviction structural levels, because multiple independent
+    session references converge at the same price area.
+
+    Parameters
+    ----------
+    all_prices:
+        Combined list of mapped line prices.  Duplicates are acceptable;
+        they increase the cluster count and thus the strength rating.
+    cluster_radius:
+        Maximum price distance between adjacent lines for inclusion in the
+        same cluster.  Defaults to :data:`_CONFLUENCE_ZONE_RADIUS_PTS`
+        (20 pts).  Pass ``atr * 0.20`` for an ATR-scaled version.
+
+    Returns
+    -------
+    List of dicts, each with keys:
+
+    * ``price`` – representative price (cluster mean).
+    * ``count`` – number of lines in the cluster.
+    * ``lines`` – individual prices contributing to the zone.
+    * ``strength`` – ``"strong"`` (≥ 3 lines), ``"moderate"`` (2), or
+      ``"weak"`` (1).
+
+    Sorted by *count* descending then *price* descending so the most
+    confluent, highest zones appear first.
+    """
+    if not all_prices:
+        return []
+
+    sorted_prices = sorted(all_prices)
+    clusters: List[List[float]] = [[sorted_prices[0]]]
+
+    for p in sorted_prices[1:]:
+        if p - clusters[-1][-1] <= cluster_radius:
+            clusters[-1].append(p)
+        else:
+            clusters.append([p])
+
+    zones: List[dict] = []
+    for cluster in clusters:
+        rep = round(sum(cluster) / len(cluster), 4)
+        count = len(cluster)
+        strength = "strong" if count >= 3 else ("moderate" if count >= 2 else "weak")
+        zones.append({"price": rep, "count": count, "lines": cluster, "strength": strength})
+
+    zones.sort(key=lambda z: (-z["count"], -z["price"]))
+    return zones
 
 
 def _filter_outlier_prices(
@@ -1455,14 +1636,15 @@ def extract_from_image(
             )
         if debug and _debug_info is not None:
             _debug_info["chart_labels"] = [
-                {"label": txt, "y": y, "field": _label_to_field(txt), "price": None}
+                {"label": txt, "y": y, "fields": _label_to_fields(txt), "price": None}
                 for y, txt in label_tokens
             ]
             # Enrich with resolved prices where available
             for entry in _debug_info["chart_labels"]:
-                f = entry["field"]
-                if f and f in labeled_levels:
-                    entry["price"] = labeled_levels[f]
+                for f in entry["fields"]:
+                    if f in labeled_levels:
+                        entry["price"] = labeled_levels[f]
+                        break
     except Exception as exc:
         logger.debug("Chart label extraction failed for ticker=%s: %s", ticker, exc)
 
@@ -1542,9 +1724,30 @@ def extract_from_image(
                 [(round(p, 2), r.split(":")[0]) for p, r in rejected_outliers],
             )
 
+    # Step 4c: Assign interior unlabeled lines to IB slots ────────────────────
+    # For each session where both HIGH and LOW are labeled, unlabeled lines
+    # that fall inside the session range are assigned to IB (initial balance)
+    # slots.  This feeds more levels to the scoring engine without guessing.
+    if current_price is not None and labeled_levels and line_prices:
+        _skip_keys_ib = {"atr14"}
+        _labeled_price_vals = {
+            v for k, v in labeled_levels.items() if k not in _skip_keys_ib
+        }
+        _unlabeled = [p for p in line_prices if p not in _labeled_price_vals]
+        if _unlabeled:
+            ib_slots = _assign_interior_lines_to_ib_slots(_unlabeled, labeled_levels)
+            if ib_slots:
+                labeled_levels.update(ib_slots)
+                logger.info(
+                    "Interior IB assignment: ticker=%s filled %d slot(s): %s",
+                    ticker,
+                    len(ib_slots),
+                    ib_slots,
+                )
+
     # Step 5: Compute confidence ──────────────────────────────────────────────
-    # Bonus: label-matched levels improve confidence
-    label_bonus = min(0.10, len(labeled_levels) * 0.02) if labeled_levels else 0.0
+    # Bonus: label-matched levels improve confidence (up to +0.15 for 8+ labels)
+    label_bonus = min(0.15, len(labeled_levels) * 0.02) if labeled_levels else 0.0
     confidence = min(
         1.0,
         _compute_confidence(
@@ -1554,6 +1757,27 @@ def extract_from_image(
             cp_from_axis=cp_from_axis,
         ) + label_bonus,
     )
+
+    # Step 5b: Compute interior confluence zones from all extracted prices ─────
+    _all_prices_for_zones: List[float] = list(line_prices)
+    _skip_keys_zones = {"atr14"}
+    for _k, _v in labeled_levels.items():
+        if _k not in _skip_keys_zones and _v not in _all_prices_for_zones:
+            _all_prices_for_zones.append(_v)
+    _zone_radius = (
+        round(detected_atr * 0.20, 4)
+        if detected_atr and detected_atr > 0
+        else _CONFLUENCE_ZONE_RADIUS_PTS
+    )
+    interior_zones = _compute_interior_confluence_zones(_all_prices_for_zones, _zone_radius)
+    strong_zones = [z for z in interior_zones if z["strength"] in ("strong", "moderate")]
+    if strong_zones:
+        logger.info(
+            "Confluence zones: ticker=%s found %d confluent zone(s) (of %d total)",
+            ticker,
+            len(strong_zones),
+            len(interior_zones),
+        )
 
     # Step 6: Build payload when we have the minimum viable data ──────────────
     levels_payload: Optional[LevelsPayload] = None
@@ -1573,12 +1797,13 @@ def extract_from_image(
 
     logger.info(
         "Extraction complete: ticker=%s axis_points=%d lines=%d "
-        "mapped=%d labels=%d session=%s confidence=%.2f outliers_rejected=%d",
+        "mapped=%d labels=%d ib_zones=%d session=%s confidence=%.2f outliers_rejected=%d",
         ticker,
         len(axis_points),
         len(lines),
         len(line_prices),
         len(labeled_levels),
+        len(strong_zones),
         detected_session or "unknown",
         confidence,
         len(rejected_outliers),
@@ -1598,5 +1823,6 @@ def extract_from_image(
         axis_price_min=axis_price_min,
         axis_price_max=axis_price_max,
         rejected_outliers=rejected_outliers,
+        interior_confluence_zones=interior_zones,
         debug_info=_debug_info,
     )

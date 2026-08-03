@@ -650,3 +650,165 @@ class TestFilterOutlierPrices:
         assert 26_000.0 not in rejected_prices, (
             "26 000 is within 5× ATR envelope and should not be rejected"
         )
+
+
+# ---------------------------------------------------------------------------
+# _label_to_fields — multi-field compound label mapping  (PR 23)
+# ---------------------------------------------------------------------------
+
+
+from packages.core.image_extractor import _label_to_fields
+
+
+class TestLabelToFields:
+    """Verify that compound labels map to ALL matching LevelsPayload fields."""
+
+    def test_simple_label_maps_to_one_field(self):
+        assert _label_to_fields("New York Low") == ["ny_low"]
+
+    def test_simple_label_case_insensitive(self):
+        assert _label_to_fields("new york low") == ["ny_low"]
+
+    def test_compound_label_maps_to_two_fields(self):
+        fields = _label_to_fields("Prev Day High / London High")
+        assert "pdh" in fields
+        assert "london_high" in fields
+        assert len(fields) == 2
+
+    def test_compound_pdl_london_low(self):
+        fields = _label_to_fields("Prev Day Low / London Low")
+        assert "pdl" in fields
+        assert "london_low" in fields
+
+    def test_unknown_label_returns_empty(self):
+        assert _label_to_fields("Garbage Label XYZ") == []
+
+    def test_empty_string_returns_empty(self):
+        assert _label_to_fields("") == []
+
+    def test_no_duplicate_fields(self):
+        """Even if label text matches the same field twice, no duplicates."""
+        fields = _label_to_fields("Asia High")
+        assert fields.count("asia_high") == 1
+
+    def test_prev_week_high(self):
+        assert _label_to_fields("Prev Week High") == ["globex_high"]
+
+    def test_new_york_open(self):
+        assert _label_to_fields("New York Open") == ["rth_open"]
+
+    def test_london_open(self):
+        assert _label_to_fields("London Open") == ["london_open"]
+
+    def test_prev_4h_high(self):
+        assert _label_to_fields("Prev 4H High") == ["ny_high"]
+
+    def test_prev_4h_high_slash_new_york_high(self):
+        """Compound 'Prev 4H High / New York High' -> ny_high (deduped)."""
+        fields = _label_to_fields("Prev 4H High / New York High")
+        assert "ny_high" in fields
+        assert fields.count("ny_high") == 1
+
+
+# ---------------------------------------------------------------------------
+# _assign_interior_lines_to_ib_slots  (PR 23)
+# ---------------------------------------------------------------------------
+
+
+from packages.core.image_extractor import _assign_interior_lines_to_ib_slots
+
+
+class TestAssignInteriorLinesToIbSlots:
+    """Verify IB-slot assignment from unlabeled interior lines."""
+
+    def test_assigns_ny_ib_when_ny_bounds_known(self):
+        labeled = {"ny_low": 28_100.0, "ny_high": 28_500.0}
+        unlabeled = [28_200.0, 28_400.0]
+        slots = _assign_interior_lines_to_ib_slots(unlabeled, labeled)
+        assert "ny_ib_low" in slots
+        assert "ny_ib_high" in slots
+        assert slots["ny_ib_low"] == pytest.approx(28_200.0)
+        assert slots["ny_ib_high"] == pytest.approx(28_400.0)
+
+    def test_no_assignment_when_bounds_missing(self):
+        labeled = {"ny_high": 28_500.0}
+        slots = _assign_interior_lines_to_ib_slots([28_200.0], labeled)
+        assert "ny_ib_low" not in slots
+        assert "ny_ib_high" not in slots
+
+    def test_no_assignment_for_exterior_prices(self):
+        labeled = {"ny_low": 28_100.0, "ny_high": 28_500.0}
+        slots = _assign_interior_lines_to_ib_slots([28_000.0, 28_600.0], labeled)
+        assert slots == {}
+
+    def test_does_not_overwrite_existing_labeled_slot(self):
+        labeled = {"ny_low": 28_100.0, "ny_high": 28_500.0, "ny_ib_low": 28_250.0}
+        slots = _assign_interior_lines_to_ib_slots([28_200.0], labeled)
+        assert "ny_ib_low" not in slots
+
+    def test_london_ib_slots_assigned(self):
+        labeled = {"london_low": 28_000.0, "london_high": 28_400.0}
+        unlabeled = [28_150.0, 28_300.0]
+        slots = _assign_interior_lines_to_ib_slots(unlabeled, labeled)
+        assert "london_ib_low" in slots
+        assert "london_ib_high" in slots
+
+    def test_empty_unlabeled_returns_empty(self):
+        labeled = {"ny_low": 28_100.0, "ny_high": 28_500.0}
+        assert _assign_interior_lines_to_ib_slots([], labeled) == {}
+
+
+# ---------------------------------------------------------------------------
+# _compute_interior_confluence_zones  (PR 23)
+# ---------------------------------------------------------------------------
+
+
+from packages.core.image_extractor import _compute_interior_confluence_zones
+
+
+class TestComputeInteriorConfluenceZones:
+    """Verify clustering of line prices into confluence zones."""
+
+    def test_single_price_yields_one_weak_zone(self):
+        zones = _compute_interior_confluence_zones([28_000.0])
+        assert len(zones) == 1
+        assert zones[0]["strength"] == "weak"
+        assert zones[0]["count"] == 1
+        assert zones[0]["price"] == pytest.approx(28_000.0)
+
+    def test_two_nearby_prices_merged_into_moderate(self):
+        zones = _compute_interior_confluence_zones([28_000.0, 28_010.0], cluster_radius=20.0)
+        assert len(zones) == 1
+        assert zones[0]["strength"] == "moderate"
+        assert zones[0]["count"] == 2
+
+    def test_three_nearby_prices_create_strong_zone(self):
+        zones = _compute_interior_confluence_zones(
+            [28_000.0, 28_010.0, 28_015.0], cluster_radius=20.0
+        )
+        assert len(zones) == 1
+        assert zones[0]["strength"] == "strong"
+        assert zones[0]["count"] == 3
+
+    def test_distant_prices_create_separate_zones(self):
+        zones = _compute_interior_confluence_zones([28_000.0, 28_200.0], cluster_radius=20.0)
+        assert len(zones) == 2
+
+    def test_representative_price_is_mean(self):
+        zones = _compute_interior_confluence_zones([28_000.0, 28_020.0], cluster_radius=30.0)
+        assert zones[0]["price"] == pytest.approx(28_010.0)
+
+    def test_sorted_by_count_then_price_desc(self):
+        zones = _compute_interior_confluence_zones(
+            [28_000.0, 28_005.0, 28_500.0], cluster_radius=20.0
+        )
+        assert len(zones) >= 2
+        assert zones[0]["count"] >= zones[-1]["count"]
+
+    def test_empty_prices_returns_empty(self):
+        assert _compute_interior_confluence_zones([]) == []
+
+    def test_interior_confluence_zones_on_extraction_result(self):
+        """ExtractionResult default has interior_confluence_zones as empty list."""
+        result = ExtractionResult()
+        assert result.interior_confluence_zones == []
