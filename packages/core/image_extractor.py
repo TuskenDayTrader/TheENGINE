@@ -14,9 +14,12 @@ Internal helpers (exported for unit testing)
 ---------------------------------------------
 - ``_detect_horizontal_lines(img)``
 - ``_parse_price_axis(img)``
+- ``_extract_chart_labels(img)``
+- ``_match_labels_to_lines(labels, lines, axis_points)``
+- ``_extract_session_info(img)``
 - ``_map_y_to_price(y, axis_points)``
 - ``_deduplicate_lines(lines, tol)``
-- ``_build_levels_payload(line_prices, current_price)``
+- ``_build_levels_payload(line_prices, current_price, labeled_levels)``
 - ``_compute_confidence(...)``
 
 Known limitations (MVP)
@@ -26,14 +29,16 @@ Known limitations (MVP)
   red (#f23645).  Custom colours may not be detected.
 - Price-axis OCR requires ``tesseract-ocr`` to be installed on the host.
 - ``current_price`` is estimated; it is *not* read from user input.
+- Chart labels are read from the right-margin annotation zone; coverage
+  depends on the TradingView indicator/study layout used.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +152,100 @@ CONFIDENCE_LOW_THRESHOLD: float = 0.50
 # Minimum axis points required to establish a reliable price scale
 _MIN_AXIS_POINTS_FOR_SCALE: int = 3
 
+# ---------------------------------------------------------------------------
+# Label extraction constants
+# ---------------------------------------------------------------------------
+
+# The chart-label zone is in the right portion of the chart image, between
+# the plot area right edge and the numeric price axis strip.
+# These fractions define the x-range for label OCR (relative to full image width).
+_LABEL_ZONE_LEFT_FRACTION: float = 0.60   # start of label zone
+_LABEL_ZONE_RIGHT_FRACTION: float = 0.86  # end of label zone (just before price axis)
+
+# Maximum y-pixel distance between a chart label and its nearest horizontal
+# line for the two to be associated.
+_LABEL_LINE_MATCH_TOLERANCE_PX: int = 20
+
+# Session-info panel is in the bottom-right corner.
+_SESSION_PANEL_TOP_FRACTION: float = 0.82
+_SESSION_PANEL_LEFT_FRACTION: float = 0.72
+
+# Canonical label → LevelsPayload field mapping.
+# Normalised label text (lowercase, stripped) → field name.
+# Compound labels like "Prev Day High / London High" are split on "/" and
+# each part is tried independently; the first match wins.
+_LABEL_FIELD_MAP: Dict[str, str] = {
+    # Previous day
+    "prev day high": "pdh",
+    "previous day high": "pdh",
+    "prior day high": "pdh",
+    "prevdayhigh": "pdh",
+    "pdh": "pdh",
+    "prev day low": "pdl",
+    "previous day low": "pdl",
+    "prior day low": "pdl",
+    "prevdaylow": "pdl",
+    "pdl": "pdl",
+    # Prior settle / close
+    "prior settle": "prior_settle",
+    "prev settle": "prior_settle",
+    "prior close": "prior_settle",
+    "prev close": "prior_settle",
+    # Globex session
+    "globex high": "globex_high",
+    "globex low": "globex_low",
+    # Asian / Tokyo session
+    "asia high": "asia_high",
+    "asian high": "asia_high",
+    "asia low": "asia_low",
+    "asian low": "asia_low",
+    # London session
+    "london high": "london_high",
+    "london low": "london_low",
+    # New York session
+    "new york high": "ny_high",
+    "newyork high": "ny_high",
+    "ny high": "ny_high",
+    "new york low": "ny_low",
+    "newyork low": "ny_low",
+    "ny low": "ny_low",
+    "new york open": "rth_open",
+    "newyork open": "rth_open",
+    "ny open": "rth_open",
+    # 4H references mapped to session equivalents where possible
+    "prev 4h high": "ny_high",
+    "prev 4h low": "ny_low",
+    # Week / month references (stored in custom slots if LevelsPayload grows)
+    # currently omitted — no matching field exists.
+}
+
+
+def _normalise_label(text: str) -> str:
+    """Lowercase, collapse whitespace, strip punctuation for label matching."""
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9 /]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _label_to_field(raw_label: str) -> Optional[str]:
+    """
+    Map a raw OCR label string to a ``LevelsPayload`` field name.
+
+    Handles compound labels separated by ``/`` by trying each part in order.
+    Returns ``None`` when no mapping is found.
+    """
+    normalised = _normalise_label(raw_label)
+    # Try the full label first
+    if normalised in _LABEL_FIELD_MAP:
+        return _LABEL_FIELD_MAP[normalised]
+    # Split compound labels on "/"
+    for part in normalised.split("/"):
+        part = part.strip()
+        if part in _LABEL_FIELD_MAP:
+            return _LABEL_FIELD_MAP[part]
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Public data model
@@ -179,13 +278,27 @@ class ExtractionResult:
     #: Human-readable warning when confidence < :data:`CONFIDENCE_LOW_THRESHOLD`.
     warning: Optional[str] = None
 
+    #: Label-to-price mapping extracted from chart right-margin annotations.
+    #: Keys are LevelsPayload field names (e.g. "ny_low"), values are prices.
+    #: Empty dict when no labels were readable.
+    labeled_levels: Dict[str, float] = field(default_factory=dict)
+
+    #: Session context parsed from the bottom-right panel (e.g. "Globex",
+    #: "New York").  ``None`` when the panel could not be read.
+    detected_session: Optional[str] = None
+
+    #: ATR value parsed from the session panel.  ``None`` when unavailable.
+    detected_atr: Optional[float] = None
+
     #: Optional diagnostic counters populated when ``debug=True`` is passed to
     #: :func:`extract_from_image`.  Keys: ``image_size``, ``chart_roi``,
     #: ``green_mask_pixels``, ``red_mask_pixels``, ``contour_segments_raw``,
     #: ``hough_segments_raw``, ``raw_green_candidates``, ``raw_red_candidates``,
     #: ``filtered_by_slope``, ``filtered_by_length``,
     #: ``segments_before_dedup``, ``segments_after_dedup``,
-    #: ``kept_lines`` (list of dicts with ``y_pixel``, ``color``, ``price``).
+    #: ``kept_lines`` (list of dicts with ``y_pixel``, ``color``, ``price``),
+    #: ``chart_labels`` (list of dicts with ``label``, ``y``, ``field``,
+    #: ``price``).
     debug_info: Optional[dict] = None
 
 
@@ -672,50 +785,287 @@ def _map_y_to_price(
     return p0 + t * (p1 - p0)
 
 
+def _extract_chart_labels(
+    img: "np.ndarray",
+) -> List[Tuple[int, str]]:
+    """
+    OCR the right-margin label zone of a TradingView chart to find named
+    level annotations (e.g. "Asia High", "New York Low").
+
+    TradingView renders these as white text directly on the dark chart
+    background, to the left of the numeric price axis.
+
+    Parameters
+    ----------
+    img:
+        Full BGR screenshot.
+
+    Returns
+    -------
+    List of ``(y_pixel, raw_label_text)`` tuples for all recognised text
+    tokens in the label zone.  The y-pixel is the vertical centre of the
+    text word in full-image coordinates.  Returns an empty list when OCR
+    is unavailable.
+    """
+    if not (_CV2_AVAILABLE and _TESSERACT_AVAILABLE):
+        return []
+
+    h, w = img.shape[:2]
+    label_x0 = int(w * _LABEL_ZONE_LEFT_FRACTION)
+    label_x1 = int(w * _LABEL_ZONE_RIGHT_FRACTION)
+    label_crop = img[:, label_x0:label_x1, :]
+
+    gray = cv2.cvtColor(label_crop, cv2.COLOR_BGR2GRAY)
+    # White text on dark background → binary threshold
+    _, thresh = cv2.threshold(gray, 140, 255, cv2.THRESH_BINARY)
+
+    try:
+        data = pytesseract.image_to_data(
+            thresh,
+            config="--psm 11",
+            output_type=pytesseract.Output.DICT,
+        )
+    except (TesseractNotFoundError, OSError, Exception) as exc:
+        logger.debug("Chart-label OCR failed: %s", exc)
+        return []
+
+    tokens: List[Tuple[int, str]] = []
+    for i, text in enumerate(data["text"]):
+        raw = (text or "").strip()
+        if not raw or len(raw) < 2:
+            continue
+        # Filter out numeric-only tokens (those belong to the price axis)
+        if re.fullmatch(r"[\d.,]+", raw):
+            continue
+        # Skip very low-confidence tokens
+        conf = int(data.get("conf", [-1] * len(data["text"]))[i] or -1)
+        if conf < 20 and conf != -1:
+            continue
+        word_y = int(data["top"][i]) + int(data["height"][i]) // 2
+        tokens.append((word_y, raw))
+
+    return tokens
+
+
+def _match_labels_to_lines(
+    label_tokens: List[Tuple[int, str]],
+    lines: List[Tuple[int, str]],
+    axis_points: List[Tuple[int, float]],
+    tol: int = _LABEL_LINE_MATCH_TOLERANCE_PX,
+) -> Dict[str, float]:
+    """
+    Associate OCR label tokens with detected horizontal lines and compute
+    the price for each recognised field.
+
+    Strategy
+    --------
+    1. Group nearby label tokens (within ``tol`` px) into phrases.
+    2. For each phrase, resolve it to a ``LevelsPayload`` field via
+       :func:`_label_to_field`.
+    3. Find the nearest horizontal line within ``tol`` pixels.
+    4. Map that line's y-coordinate to a price via :func:`_map_y_to_price`.
+
+    Parameters
+    ----------
+    label_tokens:
+        ``(y_pixel, text)`` pairs from :func:`_extract_chart_labels`.
+    lines:
+        ``(y_pixel, color)`` pairs from :func:`_detect_horizontal_lines`.
+    axis_points:
+        Calibrated price axis for price mapping.
+    tol:
+        Maximum pixel gap for grouping tokens into phrases AND for
+        matching a phrase to its nearest line.
+
+    Returns
+    -------
+    Dict mapping LevelsPayload field names to their extracted price values.
+    """
+    if not label_tokens or not lines or len(axis_points) < 2:
+        return {}
+
+    # ── Step 1: group nearby tokens into phrases ──────────────────────────────
+    # Tokens within tol px vertically are on the same label row; concatenate
+    # their text in x-order (approximate by token order from Tesseract).
+    sorted_tokens = sorted(label_tokens, key=lambda t: t[0])
+    phrases: List[Tuple[int, str]] = []  # (median_y, full_phrase)
+    group: List[Tuple[int, str]] = [sorted_tokens[0]]
+    for token in sorted_tokens[1:]:
+        if token[0] - group[-1][0] <= tol:
+            group.append(token)
+        else:
+            median_y = sorted(g[0] for g in group)[len(group) // 2]
+            phrase = " ".join(t[1] for t in group)
+            phrases.append((median_y, phrase))
+            group = [token]
+    if group:
+        median_y = sorted(g[0] for g in group)[len(group) // 2]
+        phrase = " ".join(t[1] for t in group)
+        phrases.append((median_y, phrase))
+
+    # ── Step 2 & 3: resolve each phrase to a field and nearest line ───────────
+    labeled: Dict[str, float] = {}
+    line_ys = [y for y, _ in lines]
+
+    for phrase_y, phrase_text in phrases:
+        field = _label_to_field(phrase_text)
+        if field is None:
+            continue
+
+        # Find nearest detected line
+        if not line_ys:
+            continue
+        nearest_y = min(line_ys, key=lambda ly: abs(ly - phrase_y))
+        if abs(nearest_y - phrase_y) > tol * 3:
+            # No line close enough — try mapping directly from the phrase y
+            nearest_y = phrase_y
+
+        price = _map_y_to_price(nearest_y, axis_points)
+        if price is None or price <= 0:
+            continue
+
+        # Only overwrite a field if this match is closer to its line
+        if field not in labeled:
+            labeled[field] = round(price, 4)
+        else:
+            # Keep whichever was matched with a closer line distance
+            existing_y = min(line_ys, key=lambda ly: abs(ly - phrase_y))
+            if abs(nearest_y - phrase_y) < abs(existing_y - phrase_y):
+                labeled[field] = round(price, 4)
+
+    return labeled
+
+
+def _extract_session_info(
+    img: "np.ndarray",
+) -> Tuple[Optional[str], Optional[float]]:
+    """
+    Parse the session info panel in the bottom-right corner of the chart.
+
+    TradingView renders a small table: ``Session``, ``ATR (Chart)``,
+    ``IB Volume``.  This function extracts the session name and ATR value.
+
+    Returns
+    -------
+    ``(session_name, atr_value)`` — either or both may be ``None`` when
+    OCR cannot read the panel.
+    """
+    if not (_CV2_AVAILABLE and _TESSERACT_AVAILABLE):
+        return None, None
+
+    h, w = img.shape[:2]
+    panel_y0 = int(h * _SESSION_PANEL_TOP_FRACTION)
+    panel_x0 = int(w * _SESSION_PANEL_LEFT_FRACTION)
+    panel_crop = img[panel_y0:, panel_x0:, :]
+
+    gray = cv2.cvtColor(panel_crop, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
+
+    try:
+        text = pytesseract.image_to_string(thresh, config="--psm 6").strip()
+    except (TesseractNotFoundError, OSError, Exception) as exc:
+        logger.debug("Session panel OCR failed: %s", exc)
+        return None, None
+
+    session: Optional[str] = None
+    atr_val: Optional[float] = None
+
+    for line in text.splitlines():
+        line = line.strip()
+        # Session line: "Session   Globex" or "Session New York"
+        m_sess = re.search(
+            r"session[:\s]+([a-z ()\-]+)",
+            line,
+            re.IGNORECASE,
+        )
+        if m_sess and session is None:
+            session = m_sess.group(1).strip().title()
+
+        # ATR line: "ATR (Chart) 113.00" or "ATR   107.50"
+        m_atr = re.search(
+            r"atr[^0-9]*([0-9]+\.?[0-9]*)",
+            line,
+            re.IGNORECASE,
+        )
+        if m_atr and atr_val is None:
+            try:
+                atr_val = float(m_atr.group(1))
+            except ValueError:
+                pass
+
+    return session, atr_val
+
+
 def _build_levels_payload(
-    line_prices: List[float], current_price: float
+    line_prices: List[float],
+    current_price: float,
+    labeled_levels: Optional[Dict[str, float]] = None,
 ) -> LevelsPayload:
     """
-    Build a ``LevelsPayload`` from a list of extracted line prices and an
-    estimated current price.
+    Build a ``LevelsPayload`` from extracted line prices and an estimated
+    current price, preferring label-mapped values when available.
 
-    Resistance prices (above current) are mapped to named resistance fields
-    in descending order.  Support prices (below current) are mapped to
-    named support fields in ascending order from current.
+    When *labeled_levels* is provided and non-empty, those field assignments
+    take precedence over the positional (blind) slot-filling.  Any remaining
+    unnamed line prices are used to fill empty optional slots.
 
-    An ATR14 estimate is derived from the full detected price range.
+    An ATR14 estimate is derived from the full detected price range; if
+    ``atr14`` is already present in *labeled_levels* it is kept.
     """
+    labeled = labeled_levels or {}
+
     resistance = sorted(
         [p for p in line_prices if p > current_price], reverse=True
     )
     support = sorted([p for p in line_prices if p < current_price])
 
-    # Named field slots in priority order
+    # Named field slots in priority order (used when label mapping misses a slot)
     _RES_FIELDS = ["pdh", "globex_high", "asia_high", "london_high", "ny_high"]
     _SUP_FIELDS = ["pdl", "globex_low", "asia_low", "london_low", "ny_low"]
 
-    kwargs: dict = {
-        # Required fields; fall back to tiny synthetic offsets when no
-        # extracted levels exist on that side
-        "pdh": resistance[0] if resistance else round(current_price * _SYNTHETIC_RESISTANCE_OFFSET, 4),
-        "pdl": support[0] if support else round(current_price * _SYNTHETIC_SUPPORT_OFFSET, 4),
-        "prior_settle": current_price,
-    }
+    # Start with label-mapped values (authoritative)
+    kwargs: dict = {}
+    kwargs.update({k: v for k, v in labeled.items() if v is not None})
+
+    # Required fields — fill from labels or fall back to positional heuristic
+    if "pdh" not in kwargs:
+        kwargs["pdh"] = (
+            resistance[0]
+            if resistance
+            else round(current_price * _SYNTHETIC_RESISTANCE_OFFSET, 4)
+        )
+    if "pdl" not in kwargs:
+        kwargs["pdl"] = (
+            support[0]
+            if support
+            else round(current_price * _SYNTHETIC_SUPPORT_OFFSET, 4)
+        )
+    if "prior_settle" not in kwargs:
+        kwargs["prior_settle"] = current_price
+
+    # Fill remaining optional slots with unnamed line prices
+    res_used = {kwargs.get(f) for f in _RES_FIELDS if f in kwargs}
+    sup_used = {kwargs.get(f) for f in _SUP_FIELDS if f in kwargs}
+
+    res_unnamed = [p for p in resistance if p not in res_used]
+    sup_unnamed = [p for p in support if p not in sup_used]
 
     for slot, fname in enumerate(_RES_FIELDS[1:], start=1):
-        if slot < len(resistance):
-            kwargs[fname] = resistance[slot]
+        if fname not in kwargs and slot - 1 < len(res_unnamed):
+            kwargs[fname] = res_unnamed[slot - 1]
 
     for slot, fname in enumerate(_SUP_FIELDS[1:], start=1):
-        if slot < len(support):
-            kwargs[fname] = support[slot]
+        if fname not in kwargs and slot - 1 < len(sup_unnamed):
+            kwargs[fname] = sup_unnamed[slot - 1]
 
-    # Rough ATR14 estimate: range of all detected prices divided by 14
-    all_prices = resistance + support + [current_price]
-    if len(all_prices) >= 2:
-        price_range = max(all_prices) - min(all_prices)
-        if price_range > 0:
-            kwargs["atr14"] = round(price_range / 14.0, 4)
+    # ATR14: use detected ATR from session panel if present in labeled dict,
+    # otherwise estimate from the full detected price range.
+    if "atr14" not in kwargs:
+        all_prices = list(resistance) + list(support) + [current_price]
+        if len(all_prices) >= 2:
+            price_range = max(all_prices) - min(all_prices)
+            if price_range > 0:
+                kwargs["atr14"] = round(price_range / 14.0, 4)
 
     return LevelsPayload(**kwargs)
 
@@ -870,7 +1220,9 @@ def extract_from_image(
         diagnostic counters (image size, chart ROI, mask pixel counts,
         raw/filtered candidate counts, segment counts before and after
         filtering, and ``kept_lines`` – a list of dicts with ``y_pixel``,
-        ``color``, and ``price`` for each detected level).
+        ``color``, and ``price`` for each detected level, and
+        ``chart_labels`` – a list of dicts with ``label``, ``y``,
+        ``field``, and ``price`` for each resolved chart annotation).
 
     Returns
     -------
@@ -923,22 +1275,72 @@ def extract_from_image(
     if debug and _debug_info is not None:
         _debug_info["kept_lines"] = kept_lines_debug
 
+    # Step 3b: Extract chart-margin labels and match to lines ─────────────────
+    labeled_levels: Dict[str, float] = {}
+    try:
+        label_tokens = _extract_chart_labels(img)
+        labeled_levels = _match_labels_to_lines(label_tokens, lines, axis_points)
+        if labeled_levels:
+            logger.info(
+                "Label extraction: ticker=%s found %d labeled levels: %s",
+                ticker,
+                len(labeled_levels),
+                {k: v for k, v in labeled_levels.items()},
+            )
+        if debug and _debug_info is not None:
+            _debug_info["chart_labels"] = [
+                {"label": txt, "y": y, "field": _label_to_field(txt), "price": None}
+                for y, txt in label_tokens
+            ]
+            # Enrich with resolved prices where available
+            for entry in _debug_info["chart_labels"]:
+                f = entry["field"]
+                if f and f in labeled_levels:
+                    entry["price"] = labeled_levels[f]
+    except Exception as exc:
+        logger.debug("Chart label extraction failed for ticker=%s: %s", ticker, exc)
+
+    # Step 3c: Extract session info from bottom-right panel ───────────────────
+    detected_session: Optional[str] = None
+    detected_atr: Optional[float] = None
+    try:
+        detected_session, detected_atr = _extract_session_info(img)
+        if detected_session:
+            logger.info("Session panel: ticker=%s session=%s atr=%s", ticker, detected_session, detected_atr)
+        # If the panel gave us an ATR, inject it into labeled_levels for payload building
+        if detected_atr is not None and detected_atr > 0:
+            labeled_levels["atr14"] = round(detected_atr, 4)
+    except Exception as exc:
+        logger.debug("Session info extraction failed for ticker=%s: %s", ticker, exc)
+
     # Step 4: Estimate current price ──────────────────────────────────────────
     current_price, cp_from_axis = _estimate_current_price(img, axis_points, line_prices)
 
+    # If we have prior_settle from labels use it to improve current_price estimate
+    if current_price is None and "prior_settle" in labeled_levels:
+        current_price = labeled_levels["prior_settle"]
+        cp_from_axis = False
+
     # Step 5: Compute confidence ──────────────────────────────────────────────
-    confidence = _compute_confidence(
-        num_axis_points=len(axis_points),
-        num_lines=len(lines),
-        num_mapped=len(line_prices),
-        cp_from_axis=cp_from_axis,
+    # Bonus: label-matched levels improve confidence
+    label_bonus = min(0.10, len(labeled_levels) * 0.02) if labeled_levels else 0.0
+    confidence = min(
+        1.0,
+        _compute_confidence(
+            num_axis_points=len(axis_points),
+            num_lines=len(lines),
+            num_mapped=len(line_prices),
+            cp_from_axis=cp_from_axis,
+        ) + label_bonus,
     )
 
     # Step 6: Build payload when we have the minimum viable data ──────────────
     levels_payload: Optional[LevelsPayload] = None
-    if current_price is not None and line_prices:
+    if current_price is not None and (line_prices or labeled_levels):
         try:
-            levels_payload = _build_levels_payload(line_prices, current_price)
+            levels_payload = _build_levels_payload(
+                line_prices, current_price, labeled_levels=labeled_levels
+            )
         except Exception as exc:
             logger.warning("Failed to build LevelsPayload for ticker=%s: %s", ticker, exc)
 
@@ -950,11 +1352,13 @@ def extract_from_image(
 
     logger.info(
         "Extraction complete: ticker=%s axis_points=%d lines=%d "
-        "mapped=%d confidence=%.2f",
+        "mapped=%d labels=%d session=%s confidence=%.2f",
         ticker,
         len(axis_points),
         len(lines),
         len(line_prices),
+        len(labeled_levels),
+        detected_session or "unknown",
         confidence,
     )
 
@@ -966,5 +1370,8 @@ def extract_from_image(
         num_axis_points=len(axis_points),
         extraction_confidence=confidence,
         warning=warning,
+        labeled_levels=labeled_levels,
+        detected_session=detected_session,
+        detected_atr=detected_atr,
         debug_info=_debug_info,
     )
