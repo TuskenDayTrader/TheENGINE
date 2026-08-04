@@ -271,37 +271,36 @@ class EngineStore:
         if not labeled_levels:
             return
         now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            with conn_fn() as conn:
-                for field_name, price in labeled_levels.items():
-                    if field_name in ("atr14",) or price is None:
-                        continue
-                    # Check if a nearby price already exists for this field
-                    row = conn.execute(
+        with conn_fn() as conn:
+            for field_name, price in labeled_levels.items():
+                if field_name in ("atr14",) or price is None:
+                    continue
+                # Check if a nearby price already exists for this field
+                row = conn.execute(
+                    """
+                    SELECT id, hit_count FROM level_observations
+                    WHERE ticker = ? AND field_name = ?
+                      AND ABS(price - ?) <= ?
+                    ORDER BY ABS(price - ?) ASC
+                    LIMIT 1
+                    """,
+                    (ticker, field_name, price, _LEVEL_DEDUP_TOLERANCE, price),
+                ).fetchone()
+                if row:
+                    conn.execute(
+                        "UPDATE level_observations SET hit_count = hit_count + 1, "
+                        "created_at = ? WHERE id = ?",
+                        (now, row["id"]),
+                    )
+                else:
+                    conn.execute(
                         """
-                        SELECT id, hit_count FROM level_observations
-                        WHERE ticker = ? AND field_name = ?
-                          AND ABS(price - ?) <= ?
-                        ORDER BY ABS(price - ?) ASC
-                        LIMIT 1
+                        INSERT INTO level_observations
+                            (created_at, ticker, field_name, price, session, date_et)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         """,
-                        (ticker, field_name, price, _LEVEL_DEDUP_TOLERANCE, price),
-                    ).fetchone()
-                    if row:
-                        conn.execute(
-                            "UPDATE level_observations SET hit_count = hit_count + 1, "
-                            "created_at = ? WHERE id = ?",
-                            (now, row["id"]),
-                        )
-                    else:
-                        conn.execute(
-                            """
-                            INSERT INTO level_observations
-                                (created_at, ticker, field_name, price, session, date_et)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                            """,
-                            (now, ticker, field_name, price, session, date_et),
-                        )
+                        (now, ticker, field_name, price, session, date_et),
+                    )
 
     def record_analysis(
         self, record: AnalysisRecord, extraction_id: Optional[int] = None
